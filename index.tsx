@@ -1,877 +1,2600 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
+/*
+  Sistema de Gestão Pericial - protótipo front-end completo executado localmente.
+  Todos os dados são armazenados em localStorage e manipulados via TypeScript.
 */
-/* tslint:disable */
 
-import {GoogleGenAI} from '@google/genai';
-import {marked} from 'marked';
+type Role = 'admin' | 'perito' | 'assistente';
+type TaskStatus = 'a_fazer' | 'em_andamento' | 'concluido';
+type HonorarioStatus = 'previsto' | 'recebido' | 'atrasado';
+type ProcessStatus =
+  | 'aguardando_documento'
+  | 'em_andamento'
+  | 'pericia_agendada'
+  | 'laudo_entregue'
+  | 'concluido';
+type ExpenseStatus = 'pago' | 'nao_pago';
+type NotificationType = 'prazo' | 'agenda' | 'honorario' | 'tarefa';
 
-const MODEL_NAME = 'gemini-2.5-flash';
-
-interface Note {
-  id: string;
-  rawTranscription: string;
-  polishedNote: string;
-  timestamp: number;
+interface NotificationPreference {
+  prazos: boolean;
+  agenda: boolean;
+  honorarios: boolean;
+  tarefas: boolean;
 }
 
-class VoiceNotesApp {
-  private genAI: any;
-  private mediaRecorder: MediaRecorder | null = null;
-  private recordButton: HTMLButtonElement;
-  private recordingStatus: HTMLDivElement;
-  private rawTranscription: HTMLDivElement;
-  private polishedNote: HTMLDivElement;
-  private newButton: HTMLButtonElement;
-  private themeToggleButton: HTMLButtonElement;
-  private uploadButtonInput: HTMLInputElement;
-  private themeToggleIcon: HTMLElement;
-  private audioChunks: Blob[] = [];
-  private isRecording = false;
-  private isProcessingAudio = false;
-  private currentNote: Note | null = null;
-  private stream: MediaStream | null = null;
-  private editorTitle: HTMLDivElement;
-  private hasAttemptedPermission = false;
+interface User {
+  id: string;
+  nome: string;
+  email: string;
+  cpf: string;
+  telefone: string;
+  senha: string;
+  perfil: Role;
+  preferencias: NotificationPreference;
+}
 
-  private recordingInterface: HTMLDivElement;
-  private liveRecordingTitle: HTMLDivElement;
-  private liveWaveformCanvas: HTMLCanvasElement | null;
-  private liveWaveformCtx: CanvasRenderingContext2D | null = null;
-  private liveRecordingTimerDisplay: HTMLDivElement;
-  private statusIndicatorDiv: HTMLDivElement | null;
+interface SessionInfo {
+  userId: string;
+  expiresAt: number;
+}
 
-  private audioContext: AudioContext | null = null;
-  private analyserNode: AnalyserNode | null = null;
-  private waveformDataArray: Uint8Array | null = null;
-  private waveformDrawingId: number | null = null;
-  private timerIntervalId: number | null = null;
-  private recordingStartTime: number = 0;
+interface CaseAttachment {
+  id: string;
+  nome: string;
+  tamanho: number;
+  conteudo?: string;
+}
+
+interface ProcessCase {
+  id: string;
+  numeroProcesso: string;
+  tipoPericia: string;
+  origem: string;
+  partesEnvolvidas: string;
+  dataNomeacao: string;
+  valorHonorarios: number;
+  status: ProcessStatus;
+  observacoes: string;
+  anexos: CaseAttachment[];
+}
+
+interface CalendarEvent {
+  id: string;
+  processoId: string | null;
+  titulo: string;
+  descricao: string;
+  local: string;
+  data: string;
+  prazoEntrega: string | null;
+}
+
+interface HonorarioLancamento {
+  id: string;
+  processoId: string;
+  descricao: string;
+  valor: number;
+  vencimento: string;
+  status: HonorarioStatus;
+  dataRecebimento: string | null;
+}
+
+interface TaskComment {
+  id: string;
+  autorId: string;
+  mensagem: string;
+  data: string;
+}
+
+interface TaskAttachment extends CaseAttachment {
+  tarefaId?: string;
+}
+
+interface TaskItem {
+  id: string;
+  titulo: string;
+  descricao: string;
+  responsavel: string;
+  dataInicio: string;
+  dataTermino: string;
+  status: TaskStatus;
+  processoId: string | null;
+  comentarios: TaskComment[];
+  anexos: TaskAttachment[];
+}
+
+interface FinanceEntry {
+  id: string;
+  tipo: 'receita' | 'despesa';
+  categoria: string;
+  descricao: string;
+  valor: number;
+  data: string;
+  status: ExpenseStatus;
+  responsavel: string;
+  processoId: string | null;
+}
+
+interface NotificationItem {
+  id: string;
+  tipo: NotificationType;
+  titulo: string;
+  mensagem: string;
+  data: string;
+  processoId?: string | null;
+  auto?: boolean;
+}
+
+interface SettingsState {
+  categoriasDespesa: string[];
+  tiposPericia: string[];
+  statusProcesso: ProcessStatus[];
+}
+
+interface StoredState {
+  usuarios: User[];
+  processos: ProcessCase[];
+  eventos: CalendarEvent[];
+  honorarios: HonorarioLancamento[];
+  tarefas: TaskItem[];
+  financeiro: FinanceEntry[];
+  notificacoes: NotificationItem[];
+  configuracoes: SettingsState;
+}
+
+const STORAGE_KEY = 'gestao_pericial_state_v1';
+const SESSION_KEY = 'gestao_pericial_session_v1';
+
+const DEFAULT_SETTINGS: SettingsState = {
+  categoriasDespesa: ['Custos de deslocamento', 'Honorários de assistente', 'Hospedagem'],
+  tiposPericia: ['Contábil', 'Engenharia', 'Médica', 'Tecnologia'],
+  statusProcesso: [
+    'aguardando_documento',
+    'em_andamento',
+    'pericia_agendada',
+    'laudo_entregue',
+    'concluido',
+  ],
+};
+
+const ROLE_LABEL: Record<Role, string> = {
+  admin: 'Administrador',
+  perito: 'Perito',
+  assistente: 'Assistente',
+};
+
+const PROCESS_STATUS_LABEL: Record<ProcessStatus, string> = {
+  aguardando_documento: 'Aguardando documento',
+  em_andamento: 'Em andamento',
+  pericia_agendada: 'Perícia agendada',
+  laudo_entregue: 'Laudo entregue',
+  concluido: 'Concluído',
+};
+
+const HONORARIO_STATUS_LABEL: Record<HonorarioStatus, string> = {
+  previsto: 'Previsto',
+  recebido: 'Recebido',
+  atrasado: 'Atrasado',
+};
+
+const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
+  a_fazer: 'A fazer',
+  em_andamento: 'Em andamento',
+  concluido: 'Concluído',
+};
+
+const PREF_KEY: Record<NotificationType, keyof NotificationPreference> = {
+  prazo: 'prazos',
+  agenda: 'agenda',
+  honorario: 'honorarios',
+  tarefa: 'tarefas',
+};
+
+const BADGE_CLASS_MAP: Record<string, string> = {
+  concluido: 'success',
+  laudo_entregue: 'success',
+  pericia_agendada: 'info',
+  aguardando_documento: 'warning',
+  em_andamento: 'info',
+  previsto: 'info',
+  recebido: 'success',
+  atrasado: 'danger',
+  a_fazer: 'warning',
+  em_andamento_tarefa: 'info',
+  concluido_tarefa: 'success',
+};
+
+const DATE_FORMATTER = new Intl.DateTimeFormat('pt-BR');
+const CURRENCY_FORMATTER = new Intl.NumberFormat('pt-BR', {
+  style: 'currency',
+  currency: 'BRL',
+});
+
+function uuid(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function parseDate(date: string): Date {
+  return date ? new Date(date) : new Date();
+}
+
+function formatDate(date: string | Date): string {
+  if (!date) {
+    return '-';
+  }
+  const value = typeof date === 'string' ? new Date(date) : date;
+  if (Number.isNaN(value.getTime())) {
+    return '-';
+  }
+  return DATE_FORMATTER.format(value);
+}
+
+function formatCurrency(value: number): string {
+  return CURRENCY_FORMATTER.format(value || 0);
+}
+
+function differenceInDays(date: string, from: Date = new Date()): number {
+  if (!date) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const target = parseDate(date);
+  const diff = target.getTime() - from.getTime();
+  return Math.ceil(diff / (1000 * 60 * 60 * 24));
+}
+class CaseManagementApp {
+  private state: StoredState;
+
+  private currentUser: User | null = null;
+
+  private activeSection = 'dashboard';
+
+  private dashboardRange = 90;
+
+  private calendarCursor = new Date();
 
   constructor() {
-    this.genAI = new GoogleGenAI({
-      apiKey: process.env.API_KEY,
+    this.state = this.loadState();
+    this.ensureInitialData();
+    this.restoreSession();
+    this.render();
+  }
+
+  private loadState(): StoredState {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return {
+        usuarios: [],
+        processos: [],
+        eventos: [],
+        honorarios: [],
+        tarefas: [],
+        financeiro: [],
+        notificacoes: [],
+        configuracoes: DEFAULT_SETTINGS,
+      };
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as StoredState;
+      return {
+        usuarios: parsed.usuarios ?? [],
+        processos: parsed.processos ?? [],
+        eventos: parsed.eventos ?? [],
+        honorarios: parsed.honorarios ?? [],
+        tarefas: parsed.tarefas ?? [],
+        financeiro: parsed.financeiro ?? [],
+        notificacoes: parsed.notificacoes ?? [],
+        configuracoes: {
+          categoriasDespesa:
+            parsed.configuracoes?.categoriasDespesa ?? DEFAULT_SETTINGS.categoriasDespesa,
+          tiposPericia: parsed.configuracoes?.tiposPericia ?? DEFAULT_SETTINGS.tiposPericia,
+          statusProcesso: parsed.configuracoes?.statusProcesso ?? DEFAULT_SETTINGS.statusProcesso,
+        },
+      };
+    } catch (error) {
+      console.error('Erro ao ler o estado salvo', error);
+      return {
+        usuarios: [],
+        processos: [],
+        eventos: [],
+        honorarios: [],
+        tarefas: [],
+        financeiro: [],
+        notificacoes: [],
+        configuracoes: DEFAULT_SETTINGS,
+      };
+    }
+  }
+
+  private persistState(): void {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.state));
+    this.generateNotifications();
+  }
+
+  private ensureInitialData(): void {
+    if (!this.state.usuarios.length) {
+      const admin: User = {
+        id: uuid(),
+        nome: 'Administrador',
+        email: 'admin@pericias.local',
+        cpf: '000.000.000-00',
+        telefone: '(11) 99999-9999',
+        senha: 'admin123',
+        perfil: 'admin',
+        preferencias: {
+          prazos: true,
+          agenda: true,
+          honorarios: true,
+          tarefas: true,
+        },
+      };
+      this.state.usuarios.push(admin);
+    }
+
+    if (!this.state.processos.length) {
+      this.createSampleData();
+    }
+
+    this.persistState();
+  }
+
+  private createSampleData(): void {
+    const processoId = uuid();
+    this.state.processos.push({
+      id: processoId,
+      numeroProcesso: '0001234-56.2024.8.26.0100',
+      tipoPericia: 'Contábil',
+      origem: 'TJSP - Vara Cível',
+      partesEnvolvidas: 'João Silva x Banco ABC',
+      dataNomeacao: new Date().toISOString(),
+      valorHonorarios: 8500,
+      status: 'pericia_agendada',
+      observacoes: 'Solicitar extratos bancários atualizados.',
+      anexos: [],
     });
 
-    this.recordButton = document.getElementById(
-      'recordButton',
-    ) as HTMLButtonElement;
-    this.recordingStatus = document.getElementById(
-      'recordingStatus',
-    ) as HTMLDivElement;
-    this.rawTranscription = document.getElementById(
-      'rawTranscription',
-    ) as HTMLDivElement;
-    this.polishedNote = document.getElementById(
-      'polishedNote',
-    ) as HTMLDivElement;
-    this.newButton = document.getElementById('newButton') as HTMLButtonElement;
-    this.themeToggleButton = document.getElementById(
-      'themeToggleButton',
-    ) as HTMLButtonElement;
-    this.uploadButtonInput = document.getElementById(
-      'uploadButton',
-    ) as HTMLInputElement;
-    this.themeToggleIcon = this.themeToggleButton.querySelector(
-      'i',
-    ) as HTMLElement;
-    this.editorTitle = document.querySelector(
-      '.editor-title',
-    ) as HTMLDivElement;
+    this.state.eventos.push({
+      id: uuid(),
+      processoId,
+      titulo: 'Perícia contábil',
+      descricao: 'Reunião com as partes para coleta de documentos.',
+      local: 'Fórum João Mendes',
+      data: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+      prazoEntrega: new Date(Date.now() + 20 * 24 * 60 * 60 * 1000).toISOString(),
+    });
 
-    this.recordingInterface = document.querySelector(
-      '.recording-interface',
-    ) as HTMLDivElement;
-    this.liveRecordingTitle = document.getElementById(
-      'liveRecordingTitle',
-    ) as HTMLDivElement;
-    this.liveWaveformCanvas = document.getElementById(
-      'liveWaveformCanvas',
-    ) as HTMLCanvasElement;
-    this.liveRecordingTimerDisplay = document.getElementById(
-      'liveRecordingTimerDisplay',
-    ) as HTMLDivElement;
+    this.state.honorarios.push({
+      id: uuid(),
+      processoId,
+      descricao: 'Entrada de honorários',
+      valor: 4250,
+      vencimento: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      status: 'previsto',
+      dataRecebimento: null,
+    });
 
-    if (this.liveWaveformCanvas) {
-      this.liveWaveformCtx = this.liveWaveformCanvas.getContext('2d');
-    } else {
-      console.warn(
-        'Live waveform canvas element not found. Visualizer will not work.',
-      );
-    }
+    this.state.tarefas.push({
+      id: uuid(),
+      titulo: 'Preparar minuta do laudo',
+      descricao: 'Compilar documentos e elaborar a minuta inicial.',
+      responsavel: 'Administrador',
+      dataInicio: new Date().toISOString(),
+      dataTermino: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString(),
+      status: 'em_andamento',
+      processoId,
+      comentarios: [],
+      anexos: [],
+    });
 
-    if (this.recordingInterface) {
-      this.statusIndicatorDiv = this.recordingInterface.querySelector(
-        '.status-indicator',
-      ) as HTMLDivElement;
-    } else {
-      console.warn('Recording interface element not found.');
-      this.statusIndicatorDiv = null;
-    }
+    this.state.financeiro.push({
+      id: uuid(),
+      tipo: 'despesa',
+      categoria: 'Custos de deslocamento',
+      descricao: 'Transporte para perícia',
+      valor: 150,
+      data: new Date().toISOString(),
+      status: 'pago',
+      responsavel: 'Administrador',
+      processoId,
+    });
 
-    this.bindEventListeners();
-    this.initTheme();
-    this.createNewNote();
-
-    this.recordingStatus.textContent = 'Ready to record';
+    this.state.notificacoes.push({
+      id: uuid(),
+      tipo: 'prazo',
+      titulo: 'Prazo de laudo',
+      mensagem: 'O processo 0001234 possui entrega prevista em 20 dias.',
+      data: new Date().toISOString(),
+      processoId,
+    });
   }
 
-  private bindEventListeners(): void {
-    this.recordButton.addEventListener('click', () => this.toggleRecording());
-    this.newButton.addEventListener('click', () => this.createNewNote());
-    this.themeToggleButton.addEventListener('click', () => this.toggleTheme());
-    this.uploadButtonInput.addEventListener('change', (e) =>
-      this.handleFileUpload(e),
-    );
-    window.addEventListener('resize', this.handleResize.bind(this));
-  }
-
-  private updateControlStates(): void {
-    const isBusy = this.isRecording || this.isProcessingAudio;
-
-    this.newButton.disabled = isBusy;
-    this.themeToggleButton.disabled = isBusy;
-    this.uploadButtonInput.disabled = isBusy;
-
-    const uploadLabel = document.querySelector(
-      'label[for="uploadButton"]',
-    ) as HTMLLabelElement;
-    if (uploadLabel) {
-      uploadLabel.classList.toggle('disabled', isBusy);
-    }
-
-    // The record button is only disabled when processing, but not when recording (to allow stopping).
-    this.recordButton.disabled = this.isProcessingAudio;
-  }
-
-  private async handleFileUpload(event: Event): Promise<void> {
-    const input = event.target as HTMLInputElement;
-    if (!input.files || input.files.length === 0) {
+  private restoreSession(): void {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) {
+      this.currentUser = null;
       return;
     }
 
-    const file = input.files[0];
-    if (!file.type.startsWith('audio/')) {
-      this.recordingStatus.textContent = 'Please upload a valid audio file.';
-      input.value = ''; // Reset input
-      return;
-    }
-
-    this.recordingStatus.textContent = 'Processing uploaded file...';
-
-    // processAudio will set isProcessingAudio and update controls.
-    await this.processAudio(file);
-
-    // Reset the input so the user can upload the same file again.
-    input.value = '';
-  }
-
-  private handleResize(): void {
-    if (
-      this.isRecording &&
-      this.liveWaveformCanvas &&
-      this.liveWaveformCanvas.style.display === 'block'
-    ) {
-      requestAnimationFrame(() => {
-        this.setupCanvasDimensions();
-      });
-    }
-  }
-
-  private setupCanvasDimensions(): void {
-    if (!this.liveWaveformCanvas || !this.liveWaveformCtx) return;
-
-    const canvas = this.liveWaveformCanvas;
-    const dpr = window.devicePixelRatio || 1;
-
-    const rect = canvas.getBoundingClientRect();
-    const cssWidth = rect.width;
-    const cssHeight = rect.height;
-
-    canvas.width = Math.round(cssWidth * dpr);
-    canvas.height = Math.round(cssHeight * dpr);
-
-    this.liveWaveformCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-
-  private initTheme(): void {
-    const savedTheme = localStorage.getItem('theme');
-    if (savedTheme === 'light') {
-      document.body.classList.add('light-mode');
-      this.themeToggleIcon.classList.remove('fa-sun');
-      this.themeToggleIcon.classList.add('fa-moon');
-    } else {
-      document.body.classList.remove('light-mode');
-      this.themeToggleIcon.classList.remove('fa-moon');
-      this.themeToggleIcon.classList.add('fa-sun');
-    }
-  }
-
-  private toggleTheme(): void {
-    document.body.classList.toggle('light-mode');
-    if (document.body.classList.contains('light-mode')) {
-      localStorage.setItem('theme', 'light');
-      this.themeToggleIcon.classList.remove('fa-sun');
-      this.themeToggleIcon.classList.add('fa-moon');
-    } else {
-      localStorage.setItem('theme', 'dark');
-      this.themeToggleIcon.classList.remove('fa-moon');
-      this.themeToggleIcon.classList.add('fa-sun');
-    }
-  }
-
-  private async toggleRecording(): Promise<void> {
-    if (!this.isRecording) {
-      await this.startRecording();
-    } else {
-      await this.stopRecording();
-    }
-  }
-
-  private setupAudioVisualizer(): void {
-    if (!this.stream || this.audioContext) return;
-
-    this.audioContext = new (window.AudioContext ||
-      (window as any).webkitAudioContext)();
-    const source = this.audioContext.createMediaStreamSource(this.stream);
-    this.analyserNode = this.audioContext.createAnalyser();
-
-    this.analyserNode.fftSize = 256;
-    this.analyserNode.smoothingTimeConstant = 0.75;
-
-    const bufferLength = this.analyserNode.frequencyBinCount;
-    this.waveformDataArray = new Uint8Array(bufferLength);
-
-    source.connect(this.analyserNode);
-  }
-
-  private drawLiveWaveform(): void {
-    if (
-      !this.analyserNode ||
-      !this.waveformDataArray ||
-      !this.liveWaveformCtx ||
-      !this.liveWaveformCanvas ||
-      !this.isRecording
-    ) {
-      if (this.waveformDrawingId) cancelAnimationFrame(this.waveformDrawingId);
-      this.waveformDrawingId = null;
-      return;
-    }
-
-    this.waveformDrawingId = requestAnimationFrame(() =>
-      this.drawLiveWaveform(),
-    );
-    this.analyserNode.getByteFrequencyData(this.waveformDataArray);
-
-    const ctx = this.liveWaveformCtx;
-    const canvas = this.liveWaveformCanvas;
-
-    const logicalWidth = canvas.clientWidth;
-    const logicalHeight = canvas.clientHeight;
-
-    ctx.clearRect(0, 0, logicalWidth, logicalHeight);
-
-    const bufferLength = this.analyserNode.frequencyBinCount;
-    const numBars = Math.floor(bufferLength * 0.5);
-
-    if (numBars === 0) return;
-
-    const totalBarPlusSpacingWidth = logicalWidth / numBars;
-    const barWidth = Math.max(1, Math.floor(totalBarPlusSpacingWidth * 0.7));
-    const barSpacing = Math.max(0, Math.floor(totalBarPlusSpacingWidth * 0.3));
-
-    let x = 0;
-
-    const recordingColor =
-      getComputedStyle(document.documentElement)
-        .getPropertyValue('--color-recording')
-        .trim() || '#ff3b30';
-    ctx.fillStyle = recordingColor;
-
-    for (let i = 0; i < numBars; i++) {
-      if (x >= logicalWidth) break;
-
-      const dataIndex = Math.floor(i * (bufferLength / numBars));
-      const barHeightNormalized = this.waveformDataArray[dataIndex] / 255.0;
-      let barHeight = barHeightNormalized * logicalHeight;
-
-      if (barHeight < 1 && barHeight > 0) barHeight = 1;
-      barHeight = Math.round(barHeight);
-
-      const y = Math.round((logicalHeight - barHeight) / 2);
-
-      ctx.fillRect(Math.floor(x), y, barWidth, barHeight);
-      x += barWidth + barSpacing;
-    }
-  }
-
-  private updateLiveTimer(): void {
-    if (!this.isRecording || !this.liveRecordingTimerDisplay) return;
-    const now = Date.now();
-    const elapsedMs = now - this.recordingStartTime;
-
-    const totalSeconds = Math.floor(elapsedMs / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    const hundredths = Math.floor((elapsedMs % 1000) / 10);
-
-    this.liveRecordingTimerDisplay.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(hundredths).padStart(2, '0')}`;
-  }
-
-  private startLiveDisplay(): void {
-    if (
-      !this.recordingInterface ||
-      !this.liveRecordingTitle ||
-      !this.liveWaveformCanvas ||
-      !this.liveRecordingTimerDisplay
-    ) {
-      console.warn(
-        'One or more live display elements are missing. Cannot start live display.',
-      );
-      return;
-    }
-
-    this.recordingInterface.classList.add('is-live');
-    this.liveRecordingTitle.style.display = 'block';
-    this.liveWaveformCanvas.style.display = 'block';
-    this.liveRecordingTimerDisplay.style.display = 'block';
-
-    this.setupCanvasDimensions();
-
-    if (this.statusIndicatorDiv) this.statusIndicatorDiv.style.display = 'none';
-
-    const iconElement = this.recordButton.querySelector(
-      '.record-button-inner i',
-    ) as HTMLElement;
-    if (iconElement) {
-      iconElement.classList.remove('fa-microphone');
-      iconElement.classList.add('fa-stop');
-    }
-
-    const currentTitle = this.editorTitle.textContent?.trim();
-    const placeholder =
-      this.editorTitle.getAttribute('placeholder') || 'Untitled Note';
-    this.liveRecordingTitle.textContent =
-      currentTitle && currentTitle !== placeholder
-        ? currentTitle
-        : 'New Recording';
-
-    this.setupAudioVisualizer();
-    this.drawLiveWaveform();
-
-    this.recordingStartTime = Date.now();
-    this.updateLiveTimer();
-    if (this.timerIntervalId) clearInterval(this.timerIntervalId);
-    this.timerIntervalId = window.setInterval(() => this.updateLiveTimer(), 50);
-  }
-
-  private stopLiveDisplay(): void {
-    if (
-      !this.recordingInterface ||
-      !this.liveRecordingTitle ||
-      !this.liveWaveformCanvas ||
-      !this.liveRecordingTimerDisplay
-    ) {
-      if (this.recordingInterface)
-        this.recordingInterface.classList.remove('is-live');
-      return;
-    }
-    this.recordingInterface.classList.remove('is-live');
-    this.liveRecordingTitle.style.display = 'none';
-    this.liveWaveformCanvas.style.display = 'none';
-    this.liveRecordingTimerDisplay.style.display = 'none';
-
-    if (this.statusIndicatorDiv)
-      this.statusIndicatorDiv.style.display = 'block';
-
-    const iconElement = this.recordButton.querySelector(
-      '.record-button-inner i',
-    ) as HTMLElement;
-    if (iconElement) {
-      iconElement.classList.remove('fa-stop');
-      iconElement.classList.add('fa-microphone');
-    }
-
-    if (this.waveformDrawingId) {
-      cancelAnimationFrame(this.waveformDrawingId);
-      this.waveformDrawingId = null;
-    }
-    if (this.timerIntervalId) {
-      clearInterval(this.timerIntervalId);
-      this.timerIntervalId = null;
-    }
-    if (this.liveWaveformCtx && this.liveWaveformCanvas) {
-      this.liveWaveformCtx.clearRect(
-        0,
-        0,
-        this.liveWaveformCanvas.width,
-        this.liveWaveformCanvas.height,
-      );
-    }
-
-    if (this.audioContext) {
-      if (this.audioContext.state !== 'closed') {
-        this.audioContext
-          .close()
-          .catch((e) => console.warn('Error closing audio context', e));
-      }
-      this.audioContext = null;
-    }
-    this.analyserNode = null;
-    this.waveformDataArray = null;
-  }
-
-  private async startRecording(): Promise<void> {
     try {
-      this.audioChunks = [];
-      if (this.stream) {
-        this.stream.getTracks().forEach((track) => track.stop());
-        this.stream = null;
-      }
-      if (this.audioContext && this.audioContext.state !== 'closed') {
-        await this.audioContext.close();
-        this.audioContext = null;
-      }
-
-      this.recordingStatus.textContent = 'Requesting microphone access...';
-
-      try {
-        this.stream = await navigator.mediaDevices.getUserMedia({audio: true});
-      } catch (err) {
-        console.error('Failed with basic constraints:', err);
-        this.stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          },
-        });
-      }
-
-      try {
-        this.mediaRecorder = new MediaRecorder(this.stream, {
-          mimeType: 'audio/webm',
-        });
-      } catch (e) {
-        console.error('audio/webm not supported, trying default:', e);
-        this.mediaRecorder = new MediaRecorder(this.stream);
-      }
-
-      this.mediaRecorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0)
-          this.audioChunks.push(event.data);
-      };
-
-      this.mediaRecorder.onstop = () => {
-        this.stopLiveDisplay();
-
-        if (this.audioChunks.length > 0) {
-          const audioBlob = new Blob(this.audioChunks, {
-            type: this.mediaRecorder?.mimeType || 'audio/webm',
-          });
-          this.processAudio(audioBlob).catch((err) => {
-            console.error('Error processing audio:', err);
-            this.recordingStatus.textContent = 'Error processing recording';
-          });
-        } else {
-          this.recordingStatus.textContent =
-            'No audio data captured. Please try again.';
-        }
-
-        if (this.stream) {
-          this.stream.getTracks().forEach((track) => {
-            track.stop();
-          });
-          this.stream = null;
-        }
-      };
-
-      this.mediaRecorder.start();
-      this.isRecording = true;
-      this.updateControlStates();
-
-      this.recordButton.classList.add('recording');
-      this.recordButton.setAttribute('title', 'Stop Recording');
-
-      this.startLiveDisplay();
-    } catch (error) {
-      console.error('Error starting recording:', error);
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      const errorName = error instanceof Error ? error.name : 'Unknown';
-
-      if (
-        errorName === 'NotAllowedError' ||
-        errorName === 'PermissionDeniedError'
-      ) {
-        this.recordingStatus.textContent =
-          'Microphone permission denied. Please check browser settings and reload page.';
-      } else if (
-        errorName === 'NotFoundError' ||
-        (errorName === 'DOMException' &&
-          errorMessage.includes('Requested device not found'))
-      ) {
-        this.recordingStatus.textContent =
-          'No microphone found. Please connect a microphone.';
-      } else if (
-        errorName === 'NotReadableError' ||
-        errorName === 'AbortError' ||
-        (errorName === 'DOMException' &&
-          errorMessage.includes('Failed to allocate audiosource'))
-      ) {
-        this.recordingStatus.textContent =
-          'Cannot access microphone. It may be in use by another application.';
+      const session = JSON.parse(raw) as SessionInfo;
+      if (session.expiresAt > Date.now()) {
+        this.currentUser = this.state.usuarios.find((u) => u.id === session.userId) ?? null;
       } else {
-        this.recordingStatus.textContent = `Error: ${errorMessage}`;
+        localStorage.removeItem(SESSION_KEY);
+        this.currentUser = null;
       }
-
-      this.isRecording = false;
-      if (this.stream) {
-        this.stream.getTracks().forEach((track) => track.stop());
-        this.stream = null;
-      }
-      this.recordButton.classList.remove('recording');
-      this.recordButton.setAttribute('title', 'Start Recording');
-      this.stopLiveDisplay();
-      this.updateControlStates();
+    } catch (error) {
+      console.error('Erro ao restaurar sessão', error);
+      this.currentUser = null;
     }
   }
 
-  private async stopRecording(): Promise<void> {
-    if (this.mediaRecorder && this.isRecording) {
-      try {
-        this.mediaRecorder.stop();
-      } catch (e) {
-        console.error('Error stopping MediaRecorder:', e);
-        this.stopLiveDisplay();
-      }
-
-      this.isRecording = false;
-      this.updateControlStates();
-
-      this.recordButton.classList.remove('recording');
-      this.recordButton.setAttribute('title', 'Start Recording');
-      this.recordingStatus.textContent = 'Processing audio...';
-    } else {
-      if (!this.isRecording) this.stopLiveDisplay();
-    }
-  }
-
-  private async processAudio(audioBlob: Blob): Promise<void> {
-    if (audioBlob.size === 0) {
-      this.recordingStatus.textContent =
-        'No audio data captured. Please try again.';
+  private persistSession(user: User | null): void {
+    this.currentUser = user;
+    if (!user) {
+      localStorage.removeItem(SESSION_KEY);
+      this.render();
       return;
     }
 
-    this.isProcessingAudio = true;
-    this.updateControlStates();
+    const session: SessionInfo = {
+      userId: user.id,
+      expiresAt: Date.now() + 1000 * 60 * 60 * 4,
+    };
+    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    this.render();
+  }
 
-    try {
-      URL.createObjectURL(audioBlob);
+  private render(): void {
+    const root = document.getElementById('app');
+    if (!root) {
+      return;
+    }
 
-      this.recordingStatus.textContent = 'Converting audio...';
+    if (!this.currentUser) {
+      root.innerHTML = this.renderAuthLayout();
+      this.bindAuthEvents();
+      return;
+    }
 
-      const reader = new FileReader();
-      const readResult = new Promise<string>((resolve, reject) => {
-        reader.onloadend = () => {
-          try {
-            const base64data = reader.result as string;
-            const base64Audio = base64data.split(',')[1];
-            resolve(base64Audio);
-          } catch (err) {
-            reject(err);
+    root.innerHTML = this.renderAppShell();
+    this.bindShellEvents();
+    this.renderSection(this.activeSection);
+  }
+  private renderAuthLayout(): string {
+    return `
+      <div class="auth-wrapper">
+        <div class="auth-card">
+          <div class="auth-header">
+            <h1>Gestão de Casos Periciais</h1>
+            <p>Organize processos, agenda, honorários, tarefas e finanças em um só lugar.</p>
+          </div>
+          <div class="auth-content">
+            <div class="tab-buttons" data-auth-tabs>
+              <button class="active" data-tab-target="login">Entrar</button>
+              <button data-tab-target="register">Registrar</button>
+            </div>
+            <form id="loginForm" class="form-grid" data-auth-panel="login">
+              <div class="form-group">
+                <label for="loginEmail">E-mail</label>
+                <input type="email" id="loginEmail" required placeholder="usuario@dominio.com" />
+              </div>
+              <div class="form-group">
+                <label for="loginSenha">Senha</label>
+                <input type="password" id="loginSenha" required placeholder="********" />
+              </div>
+              <button type="submit" class="primary-button">Acessar</button>
+              <button type="button" class="link-button" id="forgotPasswordButton">Esqueci minha senha</button>
+              <p class="error-message" id="loginError" style="display:none"></p>
+            </form>
+            <form id="registerForm" class="form-grid" data-auth-panel="register" style="display:none">
+              <div class="form-group">
+                <label for="registerNome">Nome completo</label>
+                <input type="text" id="registerNome" required />
+              </div>
+              <div class="form-group">
+                <label for="registerEmail">E-mail</label>
+                <input type="email" id="registerEmail" required />
+              </div>
+              <div class="form-group">
+                <label for="registerCpf">CPF</label>
+                <input type="text" id="registerCpf" required placeholder="000.000.000-00" />
+              </div>
+              <div class="form-group">
+                <label for="registerTelefone">Telefone</label>
+                <input type="tel" id="registerTelefone" required placeholder="(00) 90000-0000" />
+              </div>
+              <div class="form-group">
+                <label for="registerPerfil">Perfil de acesso</label>
+                <select id="registerPerfil" required>
+                  <option value="perito">Perito</option>
+                  <option value="assistente">Assistente</option>
+                  <option value="admin">Administrador</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="registerSenha">Senha</label>
+                <input type="password" id="registerSenha" required minlength="6" />
+              </div>
+              <button type="submit" class="primary-button">Criar conta</button>
+              <p class="error-message" id="registerError" style="display:none"></p>
+            </form>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private bindAuthEvents(): void {
+    const tabsContainer = document.querySelector('[data-auth-tabs]');
+    const tabButtons = tabsContainer?.querySelectorAll('button') ?? [];
+    const panels = document.querySelectorAll('[data-auth-panel]');
+
+    tabButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        tabButtons.forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        const target = btn.getAttribute('data-tab-target');
+        panels.forEach((panel) => {
+          if (panel instanceof HTMLElement) {
+            panel.style.display = panel.getAttribute('data-auth-panel') === target ? 'grid' : 'none';
           }
-        };
-        reader.onerror = () => reject(reader.error);
-      });
-      reader.readAsDataURL(audioBlob);
-      const base64Audio = await readResult;
-
-      if (!base64Audio) throw new Error('Failed to convert audio to base64');
-
-      const mimeType = audioBlob.type || 'audio/webm';
-      await this.getTranscription(base64Audio, mimeType);
-    } catch (error) {
-      console.error('Error in processAudio:', error);
-      this.recordingStatus.textContent =
-        'Error processing recording. Please try again.';
-    } finally {
-      this.isProcessingAudio = false;
-      this.updateControlStates();
-    }
-  }
-
-  private async getTranscription(
-    base64Audio: string,
-    mimeType: string,
-  ): Promise<void> {
-    try {
-      this.recordingStatus.textContent = 'Getting transcription...';
-
-      const contents = [
-        {text: 'Generate a complete, detailed transcript of this audio.'},
-        {inlineData: {mimeType: mimeType, data: base64Audio}},
-      ];
-
-      const response = await this.genAI.models.generateContent({
-        model: MODEL_NAME,
-        contents: contents,
-      });
-
-      const transcriptionText = response.text;
-
-      if (transcriptionText) {
-        this.rawTranscription.textContent = transcriptionText;
-        if (transcriptionText.trim() !== '') {
-          this.rawTranscription.classList.remove('placeholder-active');
-        } else {
-          const placeholder =
-            this.rawTranscription.getAttribute('placeholder') || '';
-          this.rawTranscription.textContent = placeholder;
-          this.rawTranscription.classList.add('placeholder-active');
-        }
-
-        if (this.currentNote)
-          this.currentNote.rawTranscription = transcriptionText;
-        this.recordingStatus.textContent =
-          'Transcription complete. Polishing note...';
-        this.getPolishedNote().catch((err) => {
-          console.error('Error polishing note:', err);
-          this.recordingStatus.textContent =
-            'Error polishing note after transcription.';
         });
-      } else {
-        this.recordingStatus.textContent =
-          'Transcription failed or returned empty.';
-        this.polishedNote.innerHTML =
-          '<p><em>Could not transcribe audio. Please try again.</em></p>';
-        this.rawTranscription.textContent =
-          this.rawTranscription.getAttribute('placeholder');
-        this.rawTranscription.classList.add('placeholder-active');
-      }
-    } catch (error) {
-      console.error('Error getting transcription:', error);
-      this.recordingStatus.textContent =
-        'Error getting transcription. Please try again.';
-      this.polishedNote.innerHTML = `<p><em>Error during transcription: ${error instanceof Error ? error.message : String(error)}</em></p>`;
-      this.rawTranscription.textContent =
-        this.rawTranscription.getAttribute('placeholder');
-      this.rawTranscription.classList.add('placeholder-active');
-    }
-  }
+      });
+    });
 
-  private async getPolishedNote(): Promise<void> {
-    try {
-      if (
-        !this.rawTranscription.textContent ||
-        this.rawTranscription.textContent.trim() === '' ||
-        this.rawTranscription.classList.contains('placeholder-active')
-      ) {
-        this.recordingStatus.textContent = 'No transcription to polish';
-        this.polishedNote.innerHTML =
-          '<p><em>No transcription available to polish.</em></p>';
-        const placeholder = this.polishedNote.getAttribute('placeholder') || '';
-        this.polishedNote.innerHTML = placeholder;
-        this.polishedNote.classList.add('placeholder-active');
+    const loginForm = document.getElementById('loginForm');
+    loginForm?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const email = (document.getElementById('loginEmail') as HTMLInputElement).value.trim();
+      const senha = (document.getElementById('loginSenha') as HTMLInputElement).value;
+      const user = this.state.usuarios.find(
+        (u) => u.email.toLowerCase() === email.toLowerCase() && u.senha === senha,
+      );
+      const errorEl = document.getElementById('loginError');
+      if (!user) {
+        if (errorEl) {
+          errorEl.textContent = 'Credenciais inválidas. Verifique os dados informados.';
+          errorEl.style.display = 'block';
+        }
+        return;
+      }
+      if (errorEl) {
+        errorEl.style.display = 'none';
+      }
+      this.persistSession(user);
+    });
+
+    const registerForm = document.getElementById('registerForm');
+    registerForm?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const nome = (document.getElementById('registerNome') as HTMLInputElement).value.trim();
+      const email = (document.getElementById('registerEmail') as HTMLInputElement).value.trim();
+      const cpf = (document.getElementById('registerCpf') as HTMLInputElement).value.trim();
+      const telefone = (document.getElementById('registerTelefone') as HTMLInputElement).value.trim();
+      const perfil = (document.getElementById('registerPerfil') as HTMLSelectElement).value as Role;
+      const senha = (document.getElementById('registerSenha') as HTMLInputElement).value;
+      const errorEl = document.getElementById('registerError');
+
+      if (this.state.usuarios.some((u) => u.email.toLowerCase() === email.toLowerCase())) {
+        if (errorEl) {
+          errorEl.textContent = 'Já existe um usuário cadastrado com este e-mail.';
+          errorEl.style.display = 'block';
+        }
         return;
       }
 
-      this.recordingStatus.textContent = 'Polishing note...';
+      const user: User = {
+        id: uuid(),
+        nome,
+        email,
+        cpf,
+        telefone,
+        senha,
+        perfil,
+        preferencias: {
+          prazos: true,
+          agenda: true,
+          honorarios: true,
+          tarefas: true,
+        },
+      };
 
-      const prompt = `Take this raw transcription and create a polished, well-formatted note.
-                    Remove filler words (um, uh, like), repetitions, and false starts.
-                    Format any lists or bullet points properly. Use markdown formatting for headings, lists, etc.
-                    Maintain all the original content and meaning.
+      this.state.usuarios.push(user);
+      this.persistState();
 
-                    Raw transcription:
-                    ${this.rawTranscription.textContent}`;
-      const contents = [{text: prompt}];
-
-      const response = await this.genAI.models.generateContent({
-        model: MODEL_NAME,
-        contents: contents,
-      });
-      const polishedText = response.text;
-
-      if (polishedText) {
-        const htmlContent = marked.parse(polishedText);
-        this.polishedNote.innerHTML = htmlContent;
-        if (polishedText.trim() !== '') {
-          this.polishedNote.classList.remove('placeholder-active');
-        } else {
-          const placeholder =
-            this.polishedNote.getAttribute('placeholder') || '';
-          this.polishedNote.innerHTML = placeholder;
-          this.polishedNote.classList.add('placeholder-active');
-        }
-
-        let noteTitleSet = false;
-        const lines = polishedText.split('\n').map((l) => l.trim());
-
-        for (const line of lines) {
-          if (line.startsWith('#')) {
-            const title = line.replace(/^#+\s+/, '').trim();
-            if (this.editorTitle && title) {
-              this.editorTitle.textContent = title;
-              this.editorTitle.classList.remove('placeholder-active');
-              noteTitleSet = true;
-              break;
-            }
-          }
-        }
-
-        if (!noteTitleSet && this.editorTitle) {
-          for (const line of lines) {
-            if (line.length > 0) {
-              let potentialTitle = line.replace(
-                /^[\*_\`#\->\s\[\]\(.\d)]+/,
-                '',
-              );
-              potentialTitle = potentialTitle.replace(/[\*_\`#]+$/, '');
-              potentialTitle = potentialTitle.trim();
-
-              if (potentialTitle.length > 3) {
-                const maxLength = 60;
-                this.editorTitle.textContent =
-                  potentialTitle.substring(0, maxLength) +
-                  (potentialTitle.length > maxLength ? '...' : '');
-                this.editorTitle.classList.remove('placeholder-active');
-                noteTitleSet = true;
-                break;
-              }
-            }
-          }
-        }
-
-        if (!noteTitleSet && this.editorTitle) {
-          const currentEditorText = this.editorTitle.textContent?.trim();
-          const placeholderText =
-            this.editorTitle.getAttribute('placeholder') || 'Untitled Note';
-          if (
-            currentEditorText === '' ||
-            currentEditorText === placeholderText
-          ) {
-            this.editorTitle.textContent = placeholderText;
-            if (!this.editorTitle.classList.contains('placeholder-active')) {
-              this.editorTitle.classList.add('placeholder-active');
-            }
-          }
-        }
-
-        if (this.currentNote) this.currentNote.polishedNote = polishedText;
-        this.recordingStatus.textContent =
-          'Note polished. Ready for next recording.';
-      } else {
-        this.recordingStatus.textContent =
-          'Polishing failed or returned empty.';
-        this.polishedNote.innerHTML =
-          '<p><em>Polishing returned empty. Raw transcription is available.</em></p>';
-        if (
-          this.polishedNote.textContent?.trim() === '' ||
-          this.polishedNote.innerHTML.includes('<em>Polishing returned empty')
-        ) {
-          const placeholder =
-            this.polishedNote.getAttribute('placeholder') || '';
-          this.polishedNote.innerHTML = placeholder;
-          this.polishedNote.classList.add('placeholder-active');
-        }
+      if (errorEl) {
+        errorEl.style.display = 'none';
       }
-    } catch (error) {
-      console.error('Error polishing note:', error);
-      this.recordingStatus.textContent =
-        'Error polishing note. Please try again.';
-      this.polishedNote.innerHTML = `<p><em>Error during polishing: ${error instanceof Error ? error.message : String(error)}</em></p>`;
-      if (
-        this.polishedNote.textContent?.trim() === '' ||
-        this.polishedNote.innerHTML.includes('<em>Error during polishing')
-      ) {
-        const placeholder = this.polishedNote.getAttribute('placeholder') || '';
-        this.polishedNote.innerHTML = placeholder;
-        this.polishedNote.classList.add('placeholder-active');
-      }
-    }
+
+      this.persistSession(user);
+    });
+
+    const forgotButton = document.getElementById('forgotPasswordButton');
+    forgotButton?.addEventListener('click', () => {
+      const email = (document.getElementById('loginEmail') as HTMLInputElement).value.trim();
+      const message = email
+        ? `Se houver uma conta para ${email}, entraremos em contato para redefinir a senha.`
+        : 'Informe seu e-mail no campo de login para receber instruções.';
+      alert(message);
+    });
   }
 
-  private createNewNote(): void {
-    this.currentNote = {
-      id: `note_${Date.now()}`,
-      rawTranscription: '',
-      polishedNote: '',
-      timestamp: Date.now(),
+  private renderAppShell(): string {
+    return `
+      <div class="app-shell">
+        <aside class="sidebar">
+          <div>
+            <h2>🗂️ Gestão Pericial</h2>
+          </div>
+          <nav>
+            ${this.renderNavButton('dashboard', 'Dashboard')}
+            ${this.renderNavButton('processos', 'Processos')}
+            ${this.renderNavButton('agenda', 'Agenda')}
+            ${this.renderNavButton('honorarios', 'Honorários')}
+            ${this.renderNavButton('tarefas', 'Tarefas')}
+            ${this.renderNavButton('financeiro', 'Financeiro')}
+            ${this.renderNavButton('notificacoes', 'Notificações')}
+            ${this.renderNavButton('configuracoes', 'Configurações')}
+          </nav>
+          <div class="profile-card">
+            <strong>${this.currentUser?.nome ?? ''}</strong>
+            <span>${ROLE_LABEL[this.currentUser?.perfil ?? 'assistente']}</span>
+            <button id="logoutButton">Sair</button>
+          </div>
+        </aside>
+        <main class="main-panel">
+          <section id="section-dashboard" class="section" data-section="dashboard"></section>
+          <section id="section-processos" class="section" data-section="processos" style="display:none"></section>
+          <section id="section-agenda" class="section" data-section="agenda" style="display:none"></section>
+          <section id="section-honorarios" class="section" data-section="honorarios" style="display:none"></section>
+          <section id="section-tarefas" class="section" data-section="tarefas" style="display:none"></section>
+          <section id="section-financeiro" class="section" data-section="financeiro" style="display:none"></section>
+          <section id="section-notificacoes" class="section" data-section="notificacoes" style="display:none"></section>
+          <section id="section-configuracoes" class="section" data-section="configuracoes" style="display:none"></section>
+        </main>
+      </div>
+      <div id="modalContainer"></div>
+    `;
+  }
+
+  private renderNavButton(section: string, label: string): string {
+    const active = this.activeSection === section ? 'active' : '';
+    return `<button class="${active}" data-nav="${section}">${label}</button>`;
+  }
+
+  private bindShellEvents(): void {
+    document.querySelectorAll('[data-nav]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const section = (button as HTMLElement).getAttribute('data-nav');
+        if (!section) {
+          return;
+        }
+        this.activeSection = section;
+        document.querySelectorAll('[data-section]').forEach((sectionEl) => {
+          if (sectionEl instanceof HTMLElement) {
+            sectionEl.style.display = sectionEl.getAttribute('data-section') === section ? 'block' : 'none';
+          }
+        });
+        document.querySelectorAll('[data-nav]').forEach((navBtn) => navBtn.classList.remove('active'));
+        button.classList.add('active');
+        this.renderSection(section);
+      });
+    });
+
+    const logoutButton = document.getElementById('logoutButton');
+    logoutButton?.addEventListener('click', () => this.persistSession(null));
+  }
+
+  private renderSection(section: string): void {
+    switch (section) {
+      case 'dashboard':
+        this.renderDashboard();
+        break;
+      case 'processos':
+        this.renderProcessos();
+        break;
+      case 'agenda':
+        this.renderAgenda();
+        break;
+      case 'honorarios':
+        this.renderHonorarios();
+        break;
+      case 'tarefas':
+        this.renderTarefas();
+        break;
+      case 'financeiro':
+        this.renderFinanceiro();
+        break;
+      case 'notificacoes':
+        this.renderNotificacoes();
+        break;
+      case 'configuracoes':
+        this.renderConfiguracoes();
+        break;
+      default:
+        break;
+    }
+  }
+  private renderDashboard(): void {
+    const container = document.getElementById('section-dashboard');
+    if (!container) {
+      return;
+    }
+
+    const rangeStart = new Date();
+    rangeStart.setDate(rangeStart.getDate() - this.dashboardRange);
+    const rangeLabel =
+      this.dashboardRange === 30 ? '30 dias' : this.dashboardRange === 90 ? '90 dias' : 'Último ano';
+
+    const upcomingEvents = this.state.eventos.filter((evento) => {
+      const diff = differenceInDays(evento.data);
+      return diff >= 0 && diff <= 30;
+    });
+
+    const honorariosPendentes = this.state.honorarios.filter((h) => h.status !== 'recebido');
+    const honorariosRecebidos = this.state.honorarios.filter((h) => h.status === 'recebido');
+    const tasksByStatus = {
+      pendentes: this.state.tarefas.filter((t) => t.status === 'a_fazer').length,
+      andamento: this.state.tarefas.filter((t) => t.status === 'em_andamento').length,
+      concluidas: this.state.tarefas.filter((t) => t.status === 'concluido').length,
     };
 
-    const rawPlaceholder =
-      this.rawTranscription.getAttribute('placeholder') || '';
-    this.rawTranscription.textContent = rawPlaceholder;
-    this.rawTranscription.classList.add('placeholder-active');
+    container.innerHTML = `
+      <h3>Dashboard</h3>
+      <p class="section-description">Resumo das métricas principais e próximos compromissos.</p>
+      <div class="filters-row">
+        <label>Período:</label>
+        <select id="dashboardRange">
+          <option value="30" ${this.dashboardRange === 30 ? 'selected' : ''}>Últimos 30 dias</option>
+          <option value="90" ${this.dashboardRange === 90 ? 'selected' : ''}>Últimos 90 dias</option>
+          <option value="365" ${this.dashboardRange === 365 ? 'selected' : ''}>Últimos 12 meses</option>
+        </select>
+        <span class="tag">${rangeLabel}</span>
+      </div>
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <span>Processos cadastrados</span>
+          <strong>${this.state.processos.length}</strong>
+          <small>${this.state.processos.filter((p) => parseDate(p.dataNomeacao) >= rangeStart).length} no período selecionado</small>
+        </div>
+        <div class="metric-card">
+          <span>Perícias nos próximos 30 dias</span>
+          <strong>${upcomingEvents.length}</strong>
+          <small>Eventos vinculados à agenda</small>
+        </div>
+        <div class="metric-card">
+          <span>Honorários pendentes</span>
+          <strong>${formatCurrency(
+            honorariosPendentes.reduce((acc, item) => acc + (item.status !== 'recebido' ? item.valor : 0), 0),
+          )}</strong>
+          <small>${honorariosPendentes.length} parcelas aguardando pagamento</small>
+        </div>
+        <div class="metric-card">
+          <span>Honorários recebidos</span>
+          <strong>${formatCurrency(honorariosRecebidos.reduce((acc, item) => acc + item.valor, 0))}</strong>
+          <small>${honorariosRecebidos.length} parcelas quitadas</small>
+        </div>
+        <div class="metric-card">
+          <span>Tarefas</span>
+          <strong>${tasksByStatus.pendentes + tasksByStatus.andamento + tasksByStatus.concluidas}</strong>
+          <small>${tasksByStatus.pendentes} pendentes · ${tasksByStatus.andamento} em andamento · ${tasksByStatus.concluidas} concluídas</small>
+        </div>
+      </div>
+      <div class="section" style="margin-top:1.5rem">
+        <div class="flex-between">
+          <h3 style="margin-bottom:0">Compromissos futuros</h3>
+          <button class="primary-button" id="openNewEventFromDashboard">Novo evento</button>
+        </div>
+        <div class="table-wrapper" style="margin-top:1rem">
+          <table>
+            <thead>
+              <tr>
+                <th>Data</th>
+                <th>Título</th>
+                <th>Processo</th>
+                <th>Local</th>
+                <th>Prazo do laudo</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                upcomingEvents
+                  .slice()
+                  .sort((a, b) => parseDate(a.data).getTime() - parseDate(b.data).getTime())
+                  .slice(0, 6)
+                  .map((evento) => {
+                    const processo = this.state.processos.find((p) => p.id === evento.processoId);
+                    return `
+                      <tr>
+                        <td>${formatDate(evento.data)}</td>
+                        <td>${evento.titulo}</td>
+                        <td>${processo ? processo.numeroProcesso : '-'}</td>
+                        <td>${evento.local}</td>
+                        <td>${evento.prazoEntrega ? formatDate(evento.prazoEntrega) : '-'}</td>
+                      </tr>
+                    `;
+                  })
+                  .join('') || '<tr><td colspan="5">Nenhum compromisso cadastrado.</td></tr>'
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
 
-    const polishedPlaceholder =
-      this.polishedNote.getAttribute('placeholder') || '';
-    this.polishedNote.innerHTML = polishedPlaceholder;
-    this.polishedNote.classList.add('placeholder-active');
+    document.getElementById('dashboardRange')?.addEventListener('change', (event) => {
+      const value = Number((event.target as HTMLSelectElement).value);
+      this.dashboardRange = value;
+      this.renderDashboard();
+    });
 
-    if (this.editorTitle) {
-      const placeholder =
-        this.editorTitle.getAttribute('placeholder') || 'Untitled Note';
-      this.editorTitle.textContent = placeholder;
-      this.editorTitle.classList.add('placeholder-active');
+    document.getElementById('openNewEventFromDashboard')?.addEventListener('click', () =>
+      this.openEventModal(),
+    );
+  }
+  private renderProcessos(): void {
+    const container = document.getElementById('section-processos');
+    if (!container) {
+      return;
     }
-    this.recordingStatus.textContent = 'Ready to record';
 
-    if (this.isRecording) {
-      this.mediaRecorder?.stop();
-      this.isRecording = false;
-      this.recordButton.classList.remove('recording');
-    } else {
-      this.stopLiveDisplay();
+    container.innerHTML = `
+      <div class="flex-between">
+        <div>
+          <h3>Processos e demandas técnicas</h3>
+          <p class="section-description">Cadastre, filtre e atualize os processos periciais.</p>
+        </div>
+        <button class="primary-button" id="novoProcessoButton">Novo processo</button>
+      </div>
+      <form id="filtroProcessos" class="filters-row">
+        <select name="status">
+          <option value="">Todos os status</option>
+          ${this.state.configuracoes.statusProcesso
+            .map((status) => `<option value="${status}">${PROCESS_STATUS_LABEL[status]}</option>`)
+            .join('')}
+        </select>
+        <select name="tipo">
+          <option value="">Todos os tipos</option>
+          ${this.state.configuracoes.tiposPericia
+            .map((tipo) => `<option value="${tipo}">${tipo}</option>`)
+            .join('')}
+        </select>
+        <input type="date" name="inicio" />
+        <input type="date" name="fim" />
+        <button type="submit" class="primary-button">Filtrar</button>
+      </form>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Nº do processo</th>
+              <th>Tipo de perícia</th>
+              <th>Data de nomeação</th>
+              <th>Status</th>
+              <th>Valor de honorários</th>
+              <th>Partes envolvidas</th>
+              <th>Ações</th>
+            </tr>
+          </thead>
+          <tbody id="processosTabela"></tbody>
+        </table>
+      </div>
+    `;
+
+    const tabela = document.getElementById('processosTabela');
+    const form = document.getElementById('filtroProcessos');
+
+    const renderRows = () => {
+      if (!tabela) {
+        return;
+      }
+      const dadosForm = new FormData(form as HTMLFormElement);
+      const status = (dadosForm.get('status') as ProcessStatus | '') ?? '';
+      const tipo = (dadosForm.get('tipo') as string) ?? '';
+      const inicio = dadosForm.get('inicio') as string;
+      const fim = dadosForm.get('fim') as string;
+
+      const linhas = this.state.processos
+        .filter((processo) => {
+          const data = parseDate(processo.dataNomeacao);
+          const matchesStatus = status ? processo.status === status : true;
+          const matchesTipo = tipo ? processo.tipoPericia === tipo : true;
+          const matchesInicio = inicio ? data >= parseDate(inicio) : true;
+          const matchesFim = fim ? data <= parseDate(fim) : true;
+          return matchesStatus && matchesTipo && matchesInicio && matchesFim;
+        })
+        .sort((a, b) => parseDate(b.dataNomeacao).getTime() - parseDate(a.dataNomeacao).getTime())
+        .map((processo) => {
+          const badgeClass = BADGE_CLASS_MAP[processo.status] ?? 'info';
+          return `
+            <tr data-processo-id="${processo.id}">
+              <td>${processo.numeroProcesso}</td>
+              <td>${processo.tipoPericia}</td>
+              <td>${formatDate(processo.dataNomeacao)}</td>
+              <td><span class="badge ${badgeClass}">${PROCESS_STATUS_LABEL[processo.status]}</span></td>
+              <td>${formatCurrency(processo.valorHonorarios)}</td>
+              <td>${processo.partesEnvolvidas}</td>
+              <td class="actions">
+                <button data-action="editar">Editar</button>
+                <button data-action="excluir">Excluir</button>
+              </td>
+            </tr>
+          `;
+        })
+        .join('');
+
+      tabela.innerHTML = linhas || '<tr><td colspan="7">Nenhum processo encontrado.</td></tr>';
+
+      tabela.querySelectorAll('button[data-action]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const action = (button as HTMLElement).getAttribute('data-action');
+          const row = button.closest('tr[data-processo-id]');
+          const processoId = row?.getAttribute('data-processo-id');
+          if (!processoId) {
+            return;
+          }
+          if (action === 'editar') {
+            const processo = this.state.processos.find((p) => p.id === processoId);
+            if (processo) {
+              this.openProcessModal(processo);
+            }
+          } else if (action === 'excluir') {
+            if (confirm('Deseja realmente excluir este processo?')) {
+              this.state.processos = this.state.processos.filter((p) => p.id !== processoId);
+              this.state.honorarios = this.state.honorarios.filter((h) => h.processoId !== processoId);
+              this.state.eventos = this.state.eventos.filter((e) => e.processoId !== processoId);
+              this.state.tarefas = this.state.tarefas.map((t) => ({
+                ...t,
+                processoId: t.processoId === processoId ? null : t.processoId,
+              }));
+              this.persistState();
+              renderRows();
+              this.renderDashboard();
+            }
+          }
+        });
+      });
+    };
+
+    form?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      renderRows();
+    });
+
+    renderRows();
+
+    document.getElementById('novoProcessoButton')?.addEventListener('click', () => this.openProcessModal());
+  }
+  private openProcessModal(processo?: ProcessCase): void {
+    const container = document.getElementById('modalContainer');
+    if (!container) {
+      return;
+    }
+
+    const isEdit = Boolean(processo);
+
+    container.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal">
+          <header>
+            <h4>${isEdit ? 'Editar processo' : 'Novo processo'}</h4>
+            <button id="closeModal">×</button>
+          </header>
+          <form id="processoForm" class="form-grid">
+            <div class="form-group">
+              <label>Número do processo</label>
+              <input type="text" name="numeroProcesso" required value="${processo?.numeroProcesso ?? ''}" />
+            </div>
+            <div class="form-group">
+              <label>Tipo de perícia</label>
+              <select name="tipoPericia" required>
+                ${this.state.configuracoes.tiposPericia
+                  .map(
+                    (tipo) =>
+                      `<option value="${tipo}" ${processo?.tipoPericia === tipo ? 'selected' : ''}>${tipo}</option>`,
+                  )
+                  .join('')}
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Tribunal / Origem</label>
+              <input type="text" name="origem" required value="${processo?.origem ?? ''}" />
+            </div>
+            <div class="form-group">
+              <label>Partes envolvidas</label>
+              <textarea name="partesEnvolvidas" rows="3" required>${processo?.partesEnvolvidas ?? ''}</textarea>
+            </div>
+            <div class="form-group">
+              <label>Data de nomeação</label>
+              <input type="date" name="dataNomeacao" required value="${
+                processo ? processo.dataNomeacao.slice(0, 10) : ''
+              }" />
+            </div>
+            <div class="form-group">
+              <label>Valor de honorários</label>
+              <input type="number" name="valorHonorarios" min="0" step="0.01" required value="${
+                processo?.valorHonorarios ?? ''
+              }" />
+            </div>
+            <div class="form-group">
+              <label>Status</label>
+              <select name="status">
+                ${this.state.configuracoes.statusProcesso
+                  .map(
+                    (status) =>
+                      `<option value="${status}" ${processo?.status === status ? 'selected' : ''}>${
+                        PROCESS_STATUS_LABEL[status]
+                      }</option>`,
+                  )
+                  .join('')}
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Observações</label>
+              <textarea name="observacoes" rows="3">${processo?.observacoes ?? ''}</textarea>
+            </div>
+            <div class="form-group">
+              <label>Anexos (${processo?.anexos.length ?? 0} atuais)</label>
+              <input type="file" name="anexos" multiple accept="application/pdf,image/*" />
+              ${
+                processo?.anexos?.length
+                  ? `<div class="list" style="margin-top:0.5rem">${processo.anexos
+                      .map((anexo) => `<span class="tag">${anexo.nome}</span>`)
+                      .join('')}</div>`
+                  : ''
+              }
+            </div>
+          </form>
+          <footer>
+            <button class="primary-button" id="salvarProcesso">Salvar</button>
+            <button id="cancelarProcesso">Cancelar</button>
+          </footer>
+        </div>
+      </div>
+    `;
+
+    const closeModal = () => {
+      container.innerHTML = '';
+    };
+
+    document.getElementById('closeModal')?.addEventListener('click', closeModal);
+    document.getElementById('cancelarProcesso')?.addEventListener('click', closeModal);
+
+    document.getElementById('salvarProcesso')?.addEventListener('click', async () => {
+      const form = document.getElementById('processoForm') as HTMLFormElement;
+      if (!form.reportValidity()) {
+        return;
+      }
+
+      const formData = new FormData(form);
+      const anexosInput = form.querySelector('input[name="anexos"]') as HTMLInputElement;
+      const novosAnexos = await this.readAttachments(anexosInput?.files ?? null);
+
+      const updated: ProcessCase = {
+        id: processo?.id ?? uuid(),
+        numeroProcesso: String(formData.get('numeroProcesso') ?? ''),
+        tipoPericia: formData.get('tipoPericia') as string,
+        origem: String(formData.get('origem') ?? ''),
+        partesEnvolvidas: String(formData.get('partesEnvolvidas') ?? ''),
+        dataNomeacao: new Date(String(formData.get('dataNomeacao') ?? new Date().toISOString())).toISOString(),
+        valorHonorarios: Number(formData.get('valorHonorarios') ?? 0),
+        status: formData.get('status') as ProcessStatus,
+        observacoes: String(formData.get('observacoes') ?? ''),
+        anexos: processo ? [...processo.anexos, ...novosAnexos] : novosAnexos,
+      };
+
+      if (processo) {
+        this.state.processos = this.state.processos.map((item) => (item.id === processo.id ? updated : item));
+      } else {
+        this.state.processos.push(updated);
+      }
+
+      this.persistState();
+      closeModal();
+      this.renderProcessos();
+      this.renderDashboard();
+    });
+  }
+
+  private async readAttachments(fileList: FileList | null): Promise<CaseAttachment[]> {
+    if (!fileList || !fileList.length) {
+      return [];
+    }
+
+    const promises: Promise<CaseAttachment>[] = Array.from(fileList).map((file) => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          resolve({
+            id: uuid(),
+            nome: file.name,
+            tamanho: file.size,
+            conteudo: typeof reader.result === 'string' ? reader.result : undefined,
+          });
+        };
+        reader.onerror = (error) => reject(error);
+        reader.readAsDataURL(file);
+      });
+    });
+
+    return Promise.all(promises);
+  }
+  private renderAgenda(): void {
+    const container = document.getElementById('section-agenda');
+    if (!container) {
+      return;
+    }
+
+    const monthLabel = this.calendarCursor.toLocaleDateString('pt-BR', {
+      month: 'long',
+      year: 'numeric',
+    });
+
+    const startOfMonth = new Date(this.calendarCursor.getFullYear(), this.calendarCursor.getMonth(), 1);
+    const startDay = startOfMonth.getDay();
+    const gridStart = new Date(startOfMonth);
+    gridStart.setDate(startOfMonth.getDate() - ((startDay + 6) % 7));
+
+    const cells: string[] = [];
+    for (let i = 0; i < 42; i += 1) {
+      const current = new Date(gridStart);
+      current.setDate(gridStart.getDate() + i);
+      const eventsOnDay = this.state.eventos.filter((evento) => {
+        const eventDate = parseDate(evento.data);
+        return (
+          eventDate.getFullYear() === current.getFullYear() &&
+          eventDate.getMonth() === current.getMonth() &&
+          eventDate.getDate() === current.getDate()
+        );
+      });
+      const isCurrentMonth = current.getMonth() === this.calendarCursor.getMonth();
+      cells.push(`
+        <div class="calendar-cell" data-date="${current.toISOString()}">
+          <strong style="opacity:${isCurrentMonth ? 1 : 0.4}">${current.getDate()}</strong>
+          ${eventsOnDay
+            .map((evento) => `<div class="calendar-event" data-evento-id="${evento.id}">${evento.titulo}</div>`)
+            .join('')}
+        </div>
+      `);
+    }
+
+    container.innerHTML = `
+      <div class="flex-between">
+        <div>
+          <h3>Agenda e compromissos</h3>
+          <p class="section-description">Visualização mensal de perícias, prazos e atividades programadas.</p>
+        </div>
+        <button class="primary-button" id="novoEventoButton">Novo evento</button>
+      </div>
+      <div class="flex-between">
+        <div class="inline-form">
+          <button id="prevMonth">◀</button>
+          <strong>${monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1)}</strong>
+          <button id="nextMonth">▶</button>
+        </div>
+        <div class="inline-form">
+          <input type="date" id="agendaFiltroData" />
+          <button id="agendaFiltrar" class="primary-button">Filtrar</button>
+        </div>
+      </div>
+      <div class="calendar-grid">${cells.join('')}</div>
+      <div class="section" style="margin-top:1.5rem">
+        <h3 style="margin-bottom:0.5rem">Eventos cadastrados</h3>
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Data</th>
+                <th>Título</th>
+                <th>Processo</th>
+                <th>Local</th>
+                <th>Prazo de entrega</th>
+                <th>Ações</th>
+              </tr>
+            </thead>
+            <tbody id="agendaTabela"></tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    const renderListaEventos = (filtroData?: string) => {
+      const tabela = document.getElementById('agendaTabela');
+      if (!tabela) {
+        return;
+      }
+      const eventos = this.state.eventos
+        .filter((evento) => {
+          if (!filtroData) {
+            return true;
+          }
+          return evento.data.slice(0, 10) === filtroData;
+        })
+        .sort((a, b) => parseDate(a.data).getTime() - parseDate(b.data).getTime());
+
+      tabela.innerHTML =
+        eventos
+          .map((evento) => {
+            const processo = this.state.processos.find((p) => p.id === evento.processoId);
+            return `
+              <tr data-evento-id="${evento.id}">
+                <td>${formatDate(evento.data)}</td>
+                <td>${evento.titulo}</td>
+                <td>${processo ? processo.numeroProcesso : '-'}</td>
+                <td>${evento.local}</td>
+                <td>${evento.prazoEntrega ? formatDate(evento.prazoEntrega) : '-'}</td>
+                <td class="actions">
+                  <button data-action="editar">Editar</button>
+                  <button data-action="excluir">Excluir</button>
+                </td>
+              </tr>
+            `;
+          })
+          .join('') || '<tr><td colspan="6">Nenhum evento cadastrado.</td></tr>';
+
+      tabela.querySelectorAll('button[data-action]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const action = (button as HTMLElement).getAttribute('data-action');
+          const row = button.closest('tr[data-evento-id]');
+          const eventoId = row?.getAttribute('data-evento-id');
+          if (!eventoId) {
+            return;
+          }
+          if (action === 'editar') {
+            const evento = this.state.eventos.find((e) => e.id === eventoId);
+            if (evento) {
+              this.openEventModal(evento);
+            }
+          } else if (action === 'excluir') {
+            if (confirm('Deseja excluir este evento da agenda?')) {
+              this.state.eventos = this.state.eventos.filter((e) => e.id !== eventoId);
+              this.persistState();
+              this.renderAgenda();
+            }
+          }
+        });
+      });
+    };
+
+    renderListaEventos();
+
+    document.getElementById('agendaFiltrar')?.addEventListener('click', () => {
+      const filtroData = (document.getElementById('agendaFiltroData') as HTMLInputElement).value;
+      renderListaEventos(filtroData || undefined);
+    });
+
+    document.getElementById('prevMonth')?.addEventListener('click', () => {
+      this.calendarCursor = new Date(
+        this.calendarCursor.getFullYear(),
+        this.calendarCursor.getMonth() - 1,
+        1,
+      );
+      this.renderAgenda();
+    });
+
+    document.getElementById('nextMonth')?.addEventListener('click', () => {
+      this.calendarCursor = new Date(
+        this.calendarCursor.getFullYear(),
+        this.calendarCursor.getMonth() + 1,
+        1,
+      );
+      this.renderAgenda();
+    });
+
+    document.getElementById('novoEventoButton')?.addEventListener('click', () => this.openEventModal());
+  }
+  private openEventModal(evento?: CalendarEvent): void {
+    const container = document.getElementById('modalContainer');
+    if (!container) {
+      return;
+    }
+
+    const isEdit = Boolean(evento);
+
+    container.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal">
+          <header>
+            <h4>${isEdit ? 'Editar evento' : 'Novo evento'}</h4>
+            <button id="closeModal">×</button>
+          </header>
+          <form id="eventoForm" class="form-grid">
+            <div class="form-group">
+              <label>Título</label>
+              <input type="text" name="titulo" required value="${evento?.titulo ?? ''}" />
+            </div>
+            <div class="form-group">
+              <label>Descrição</label>
+              <textarea name="descricao" rows="3">${evento?.descricao ?? ''}</textarea>
+            </div>
+            <div class="form-group">
+              <label>Processo vinculado</label>
+              <select name="processoId">
+                <option value="">Sem vínculo</option>
+                ${this.state.processos
+                  .map(
+                    (processo) =>
+                      `<option value="${processo.id}" ${evento?.processoId === processo.id ? 'selected' : ''}>${
+                        processo.numeroProcesso
+                      }</option>`,
+                  )
+                  .join('')}
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Local</label>
+              <input type="text" name="local" required value="${evento?.local ?? ''}" />
+            </div>
+            <div class="form-group">
+              <label>Data e hora</label>
+              <input type="datetime-local" name="data" required value="${
+                evento ? evento.data.slice(0, 16) : ''
+              }" />
+            </div>
+            <div class="form-group">
+              <label>Prazo para entrega de laudo</label>
+              <input type="date" name="prazoEntrega" value="${evento?.prazoEntrega?.slice(0, 10) ?? ''}" />
+            </div>
+          </form>
+          <footer>
+            <button class="primary-button" id="salvarEvento">Salvar</button>
+            <button id="cancelarEvento">Cancelar</button>
+          </footer>
+        </div>
+      </div>
+    `;
+
+    const closeModal = () => {
+      container.innerHTML = '';
+    };
+
+    document.getElementById('closeModal')?.addEventListener('click', closeModal);
+    document.getElementById('cancelarEvento')?.addEventListener('click', closeModal);
+
+    document.getElementById('salvarEvento')?.addEventListener('click', () => {
+      const form = document.getElementById('eventoForm') as HTMLFormElement;
+      if (!form.reportValidity()) {
+        return;
+      }
+
+      const formData = new FormData(form);
+      const updated: CalendarEvent = {
+        id: evento?.id ?? uuid(),
+        titulo: String(formData.get('titulo') ?? ''),
+        descricao: String(formData.get('descricao') ?? ''),
+        processoId: (formData.get('processoId') as string) || null,
+        local: String(formData.get('local') ?? ''),
+        data: new Date(String(formData.get('data') ?? new Date().toISOString())).toISOString(),
+        prazoEntrega: formData.get('prazoEntrega')
+          ? new Date(String(formData.get('prazoEntrega'))).toISOString()
+          : null,
+      };
+
+      if (evento) {
+        this.state.eventos = this.state.eventos.map((item) => (item.id === evento.id ? updated : item));
+      } else {
+        this.state.eventos.push(updated);
+      }
+
+      this.persistState();
+      closeModal();
+      this.renderAgenda();
+      this.renderDashboard();
+    });
+  }
+  private renderHonorarios(): void {
+    const container = document.getElementById('section-honorarios');
+    if (!container) {
+      return;
+    }
+
+    container.innerHTML = `
+      <div class="flex-between">
+        <div>
+          <h3>Controle de honorários</h3>
+          <p class="section-description">Registre parcelas, acompanhe vencimentos e gere relatórios por status.</p>
+        </div>
+        <button class="primary-button" id="novoHonorarioButton">Novo lançamento</button>
+      </div>
+      <form id="filtroHonorarios" class="filters-row">
+        <select name="status">
+          <option value="">Todos os status</option>
+          <option value="previsto">Previsto</option>
+          <option value="recebido">Recebido</option>
+          <option value="atrasado">Atrasado</option>
+        </select>
+        <input type="date" name="inicio" />
+        <input type="date" name="fim" />
+        <button type="submit" class="primary-button">Filtrar</button>
+      </form>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Processo</th>
+              <th>Descrição</th>
+              <th>Valor</th>
+              <th>Vencimento</th>
+              <th>Status</th>
+              <th>Ações</th>
+            </tr>
+          </thead>
+          <tbody id="honorariosTabela"></tbody>
+        </table>
+      </div>
+      <div class="metrics-grid" style="margin-top:1.5rem">
+        <div class="metric-card">
+          <span>Total previsto</span>
+          <strong>${formatCurrency(
+            this.state.honorarios.filter((h) => h.status !== 'recebido').reduce((acc, item) => acc + item.valor, 0),
+          )}</strong>
+        </div>
+        <div class="metric-card">
+          <span>Total recebido</span>
+          <strong>${formatCurrency(
+            this.state.honorarios.filter((h) => h.status === 'recebido').reduce((acc, item) => acc + item.valor, 0),
+          )}</strong>
+        </div>
+      </div>
+    `;
+
+    const tabela = document.getElementById('honorariosTabela');
+    const form = document.getElementById('filtroHonorarios');
+
+    const renderRows = () => {
+      if (!tabela) {
+        return;
+      }
+      const dadosForm = new FormData(form as HTMLFormElement);
+      const status = (dadosForm.get('status') as HonorarioStatus | '') ?? '';
+      const inicio = dadosForm.get('inicio') as string;
+      const fim = dadosForm.get('fim') as string;
+
+      const linhas = this.state.honorarios
+        .filter((item) => {
+          const matchesStatus = status ? item.status === status : true;
+          const data = parseDate(item.vencimento);
+          const matchesInicio = inicio ? data >= parseDate(inicio) : true;
+          const matchesFim = fim ? data <= parseDate(fim) : true;
+          return matchesStatus && matchesInicio && matchesFim;
+        })
+        .sort((a, b) => parseDate(a.vencimento).getTime() - parseDate(b.vencimento).getTime())
+        .map((item) => {
+          const processo = this.state.processos.find((p) => p.id === item.processoId);
+          const badgeClass = BADGE_CLASS_MAP[item.status] ?? 'info';
+          return `
+            <tr data-honorario-id="${item.id}">
+              <td>${processo ? processo.numeroProcesso : '-'}</td>
+              <td>${item.descricao}</td>
+              <td>${formatCurrency(item.valor)}</td>
+              <td>${formatDate(item.vencimento)}</td>
+              <td><span class="badge ${badgeClass}">${HONORARIO_STATUS_LABEL[item.status]}</span></td>
+              <td class="actions">
+                <button data-action="editar">Editar</button>
+                <button data-action="excluir">Excluir</button>
+              </td>
+            </tr>
+          `;
+        })
+        .join('');
+
+      tabela.innerHTML = linhas || '<tr><td colspan="6">Nenhum lançamento encontrado.</td></tr>';
+
+      tabela.querySelectorAll('button[data-action]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const action = (button as HTMLElement).getAttribute('data-action');
+          const row = button.closest('tr[data-honorario-id]');
+          const id = row?.getAttribute('data-honorario-id');
+          if (!id) {
+            return;
+          }
+          if (action === 'editar') {
+            const item = this.state.honorarios.find((h) => h.id === id);
+            if (item) {
+              this.openHonorarioModal(item);
+            }
+          } else if (action === 'excluir') {
+            if (confirm('Deseja excluir este lançamento de honorários?')) {
+              this.state.honorarios = this.state.honorarios.filter((h) => h.id !== id);
+              this.persistState();
+              renderRows();
+              this.renderDashboard();
+            }
+          }
+        });
+      });
+    };
+
+    form?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      renderRows();
+    });
+
+    renderRows();
+
+    document.getElementById('novoHonorarioButton')?.addEventListener('click', () => this.openHonorarioModal());
+  }
+
+  private openHonorarioModal(item?: HonorarioLancamento): void {
+    const container = document.getElementById('modalContainer');
+    if (!container) {
+      return;
+    }
+
+    const isEdit = Boolean(item);
+
+    container.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal">
+          <header>
+            <h4>${isEdit ? 'Editar honorário' : 'Novo honorário'}</h4>
+            <button id="closeModal">×</button>
+          </header>
+          <form id="honorarioForm" class="form-grid">
+            <div class="form-group">
+              <label>Processo</label>
+              <select name="processoId" required>
+                ${this.state.processos
+                  .map(
+                    (processo) =>
+                      `<option value="${processo.id}" ${item?.processoId === processo.id ? 'selected' : ''}>${
+                        processo.numeroProcesso
+                      }</option>`,
+                  )
+                  .join('')}
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Descrição</label>
+              <input type="text" name="descricao" required value="${item?.descricao ?? ''}" />
+            </div>
+            <div class="form-group">
+              <label>Valor</label>
+              <input type="number" name="valor" min="0" step="0.01" required value="${item?.valor ?? ''}" />
+            </div>
+            <div class="form-group">
+              <label>Data de vencimento</label>
+              <input type="date" name="vencimento" required value="${item ? item.vencimento.slice(0, 10) : ''}" />
+            </div>
+            <div class="form-group">
+              <label>Status</label>
+              <select name="status" required>
+                <option value="previsto" ${item?.status === 'previsto' ? 'selected' : ''}>Previsto</option>
+                <option value="recebido" ${item?.status === 'recebido' ? 'selected' : ''}>Recebido</option>
+                <option value="atrasado" ${item?.status === 'atrasado' ? 'selected' : ''}>Atrasado</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Data de recebimento</label>
+              <input type="date" name="dataRecebimento" value="${item?.dataRecebimento?.slice(0, 10) ?? ''}" />
+            </div>
+          </form>
+          <footer>
+            <button class="primary-button" id="salvarHonorario">Salvar</button>
+            <button id="cancelarHonorario">Cancelar</button>
+          </footer>
+        </div>
+      </div>
+    `;
+
+    const closeModal = () => {
+      container.innerHTML = '';
+    };
+
+    document.getElementById('closeModal')?.addEventListener('click', closeModal);
+    document.getElementById('cancelarHonorario')?.addEventListener('click', closeModal);
+
+    document.getElementById('salvarHonorario')?.addEventListener('click', () => {
+      const form = document.getElementById('honorarioForm') as HTMLFormElement;
+      if (!form.reportValidity()) {
+        return;
+      }
+
+      const formData = new FormData(form);
+      const updated: HonorarioLancamento = {
+        id: item?.id ?? uuid(),
+        processoId: formData.get('processoId') as string,
+        descricao: String(formData.get('descricao') ?? ''),
+        valor: Number(formData.get('valor') ?? 0),
+        vencimento: new Date(String(formData.get('vencimento') ?? new Date().toISOString())).toISOString(),
+        status: formData.get('status') as HonorarioStatus,
+        dataRecebimento: formData.get('dataRecebimento')
+          ? new Date(String(formData.get('dataRecebimento'))).toISOString()
+          : null,
+      };
+
+      if (item) {
+        this.state.honorarios = this.state.honorarios.map((h) => (h.id === item.id ? updated : h));
+      } else {
+        this.state.honorarios.push(updated);
+      }
+
+      this.persistState();
+      closeModal();
+      this.renderHonorarios();
+      this.renderDashboard();
+    });
+  }
+  private renderTarefas(): void {
+    const container = document.getElementById('section-tarefas');
+    if (!container) {
+      return;
+    }
+
+    const grouped: Record<TaskStatus, TaskItem[]> = {
+      a_fazer: [],
+      em_andamento: [],
+      concluido: [],
+    };
+    this.state.tarefas.forEach((tarefa) => {
+      grouped[tarefa.status].push(tarefa);
+    });
+
+    container.innerHTML = `
+      <div class="flex-between">
+        <div>
+          <h3>Gestão de tarefas (Kanban)</h3>
+          <p class="section-description">Organize atividades por status, registre comentários e acompanhe responsáveis.</p>
+        </div>
+        <button class="primary-button" id="novaTarefaButton">Nova tarefa</button>
+      </div>
+      <div class="kanban-board">
+        ${(['a_fazer', 'em_andamento', 'concluido'] as TaskStatus[])
+          .map((status) => {
+            const titulo = TASK_STATUS_LABEL[status];
+            return `
+              <div class="kanban-column" data-status="${status}">
+                <div class="flex-between">
+                  <h4>${titulo}</h4>
+                  <span class="tag">${grouped[status].length}</span>
+                </div>
+                <div class="stack">
+                  ${
+                    grouped[status]
+                      .map((tarefa) => {
+                        const processo = this.state.processos.find((p) => p.id === tarefa.processoId);
+                        const daysToDue = differenceInDays(tarefa.dataTermino);
+                        const badgeClass =
+                          tarefa.status === 'concluido'
+                            ? BADGE_CLASS_MAP['concluido_tarefa']
+                            : tarefa.status === 'em_andamento'
+                            ? BADGE_CLASS_MAP['em_andamento_tarefa']
+                            : BADGE_CLASS_MAP['a_fazer'];
+                        return `
+                          <article class="task-card" data-tarefa-id="${tarefa.id}">
+                            <div class="flex-between">
+                              <strong>${tarefa.titulo}</strong>
+                              <span class="badge ${badgeClass}">${TASK_STATUS_LABEL[tarefa.status]}</span>
+                            </div>
+                            <p>${tarefa.descricao}</p>
+                            <div class="flex-between">
+                              <span class="tag">Resp.: ${tarefa.responsavel}</span>
+                              <span class="tag">${daysToDue === Number.POSITIVE_INFINITY ? '-' : `${daysToDue} dias`}</span>
+                            </div>
+                            <div class="stack">
+                              <small>${processo ? `Processo: ${processo.numeroProcesso}` : 'Tarefa geral'}</small>
+                              <div class="actions">
+                                <button data-action="editar">Editar</button>
+                                <button data-action="mover">Mover</button>
+                                <button data-action="detalhes">Detalhes</button>
+                              </div>
+                            </div>
+                          </article>
+                        `;
+                      })
+                      .join('') || '<p>Nenhuma tarefa nesta coluna.</p>'
+                  }
+                </div>
+              </div>
+            `;
+          })
+          .join('')}
+      </div>
+    `;
+
+    container.querySelectorAll('[data-action="editar"]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const card = button.closest('[data-tarefa-id]');
+        const tarefaId = card?.getAttribute('data-tarefa-id');
+        const tarefa = this.state.tarefas.find((t) => t.id === tarefaId);
+        if (tarefa) {
+          this.openTarefaModal(tarefa);
+        }
+      });
+    });
+
+    container.querySelectorAll('[data-action="mover"]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const card = button.closest('[data-tarefa-id]');
+        const tarefaId = card?.getAttribute('data-tarefa-id');
+        const tarefa = this.state.tarefas.find((t) => t.id === tarefaId);
+        if (!tarefa) {
+          return;
+        }
+        const nextStatus: Record<TaskStatus, TaskStatus> = {
+          a_fazer: 'em_andamento',
+          em_andamento: 'concluido',
+          concluido: 'a_fazer',
+        };
+        tarefa.status = nextStatus[tarefa.status];
+        this.persistState();
+        this.renderTarefas();
+        this.renderDashboard();
+      });
+    });
+
+    container.querySelectorAll('[data-action="detalhes"]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const card = button.closest('[data-tarefa-id]');
+        const tarefaId = card?.getAttribute('data-tarefa-id');
+        const tarefa = this.state.tarefas.find((t) => t.id === tarefaId);
+        if (tarefa) {
+          this.openDetalheTarefaModal(tarefa);
+        }
+      });
+    });
+
+    document.getElementById('novaTarefaButton')?.addEventListener('click', () => this.openTarefaModal());
+  }
+
+  private openTarefaModal(tarefa?: TaskItem): void {
+    const container = document.getElementById('modalContainer');
+    if (!container) {
+      return;
+    }
+
+    const isEdit = Boolean(tarefa);
+
+    container.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal">
+          <header>
+            <h4>${isEdit ? 'Editar tarefa' : 'Nova tarefa'}</h4>
+            <button id="closeModal">×</button>
+          </header>
+          <form id="tarefaForm" class="form-grid">
+            <div class="form-group">
+              <label>Título</label>
+              <input type="text" name="titulo" required value="${tarefa?.titulo ?? ''}" />
+            </div>
+            <div class="form-group">
+              <label>Descrição</label>
+              <textarea name="descricao" rows="3" required>${tarefa?.descricao ?? ''}</textarea>
+            </div>
+            <div class="form-group">
+              <label>Responsável</label>
+              <input type="text" name="responsavel" required value="${tarefa?.responsavel ?? ''}" />
+            </div>
+            <div class="form-group">
+              <label>Processo vinculado</label>
+              <select name="processoId">
+                <option value="">Sem vínculo</option>
+                ${this.state.processos
+                  .map(
+                    (processo) =>
+                      `<option value="${processo.id}" ${tarefa?.processoId === processo.id ? 'selected' : ''}>${
+                        processo.numeroProcesso
+                      }</option>`,
+                  )
+                  .join('')}
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Data de início</label>
+              <input type="date" name="dataInicio" required value="${
+                tarefa ? tarefa.dataInicio.slice(0, 10) : ''
+              }" />
+            </div>
+            <div class="form-group">
+              <label>Data de término</label>
+              <input type="date" name="dataTermino" required value="${
+                tarefa ? tarefa.dataTermino.slice(0, 10) : ''
+              }" />
+            </div>
+            <div class="form-group">
+              <label>Status</label>
+              <select name="status">
+                <option value="a_fazer" ${tarefa?.status === 'a_fazer' ? 'selected' : ''}>A fazer</option>
+                <option value="em_andamento" ${tarefa?.status === 'em_andamento' ? 'selected' : ''}>Em andamento</option>
+                <option value="concluido" ${tarefa?.status === 'concluido' ? 'selected' : ''}>Concluído</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Anexos (${tarefa?.anexos.length ?? 0} atuais)</label>
+              <input type="file" name="anexos" multiple accept="application/pdf,image/*" />
+              ${
+                tarefa?.anexos?.length
+                  ? `<div class="list" style="margin-top:0.5rem">${tarefa.anexos
+                      .map((anexo) => `<span class="tag">${anexo.nome}</span>`)
+                      .join('')}</div>`
+                  : ''
+              }
+            </div>
+          </form>
+          <footer>
+            <button class="primary-button" id="salvarTarefa">Salvar</button>
+            <button id="cancelarTarefa">Cancelar</button>
+          </footer>
+        </div>
+      </div>
+    `;
+
+    const closeModal = () => {
+      container.innerHTML = '';
+    };
+
+    document.getElementById('closeModal')?.addEventListener('click', closeModal);
+    document.getElementById('cancelarTarefa')?.addEventListener('click', closeModal);
+
+    document.getElementById('salvarTarefa')?.addEventListener('click', async () => {
+      const form = document.getElementById('tarefaForm') as HTMLFormElement;
+      if (!form.reportValidity()) {
+        return;
+      }
+
+      const formData = new FormData(form);
+      const anexosInput = form.querySelector('input[name="anexos"]') as HTMLInputElement;
+      const novosAnexos = await this.readAttachments(anexosInput?.files ?? null);
+
+      const updated: TaskItem = {
+        id: tarefa?.id ?? uuid(),
+        titulo: String(formData.get('titulo') ?? ''),
+        descricao: String(formData.get('descricao') ?? ''),
+        responsavel: String(formData.get('responsavel') ?? ''),
+        processoId: (formData.get('processoId') as string) || null,
+        dataInicio: new Date(String(formData.get('dataInicio') ?? new Date().toISOString())).toISOString(),
+        dataTermino: new Date(String(formData.get('dataTermino') ?? new Date().toISOString())).toISOString(),
+        status: formData.get('status') as TaskStatus,
+        comentarios: tarefa ? tarefa.comentarios : [],
+        anexos: tarefa ? [...tarefa.anexos, ...novosAnexos] : novosAnexos,
+      };
+
+      if (tarefa) {
+        this.state.tarefas = this.state.tarefas.map((item) => (item.id === tarefa.id ? updated : item));
+      } else {
+        this.state.tarefas.push(updated);
+      }
+
+      this.persistState();
+      closeModal();
+      this.renderTarefas();
+      this.renderDashboard();
+    });
+  }
+
+  private openDetalheTarefaModal(tarefa: TaskItem): void {
+    const container = document.getElementById('modalContainer');
+    if (!container) {
+      return;
+    }
+
+    const processo = this.state.processos.find((p) => p.id === tarefa.processoId);
+
+    container.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal">
+          <header>
+            <h4>Detalhes da tarefa</h4>
+            <button id="closeModal">×</button>
+          </header>
+          <div class="stack">
+            <strong>${tarefa.titulo}</strong>
+            <p>${tarefa.descricao}</p>
+            <div class="tag">Responsável: ${tarefa.responsavel}</div>
+            <div class="tag">Status: ${TASK_STATUS_LABEL[tarefa.status]}</div>
+            <div class="tag">Período: ${formatDate(tarefa.dataInicio)} - ${formatDate(tarefa.dataTermino)}</div>
+            <div class="tag">${processo ? `Processo: ${processo.numeroProcesso}` : 'Tarefa geral'}</div>
+            <div>
+              <h4>Anexos</h4>
+              ${
+                tarefa.anexos.length
+                  ? `<div class="list">${tarefa.anexos
+                      .map(
+                        (anexo) =>
+                          `<a href="${anexo.conteudo ?? ''}" download="${anexo.nome}" class="tag" target="_blank">${
+                            anexo.nome
+                          }</a>`,
+                      )
+                      .join('')}</div>`
+                  : '<p>Nenhum anexo cadastrado.</p>'
+              }
+            </div>
+            <div>
+              <h4>Comentários</h4>
+              <div class="list" id="comentariosLista">
+                ${
+                  tarefa.comentarios.length
+                    ? tarefa.comentarios
+                        .map((comentario) => {
+                          const autor = this.state.usuarios.find((u) => u.id === comentario.autorId);
+                          return `
+                            <div class="notification-card">
+                              <strong>${autor ? autor.nome : 'Usuário'}</strong>
+                              <small>${formatDate(comentario.data)}</small>
+                              <p>${comentario.mensagem}</p>
+                            </div>
+                          `;
+                        })
+                        .join('')
+                    : '<p>Nenhum comentário registrado.</p>'
+                }
+              </div>
+              <form id="comentarioForm" class="form-grid" style="margin-top:1rem">
+                <div class="form-group">
+                  <label>Adicionar comentário</label>
+                  <textarea name="comentario" rows="3" required></textarea>
+                </div>
+                <button type="submit" class="primary-button">Registrar comentário</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const closeModal = () => {
+      container.innerHTML = '';
+    };
+
+    document.getElementById('closeModal')?.addEventListener('click', closeModal);
+
+    document.getElementById('comentarioForm')?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const textarea = (event.target as HTMLFormElement).querySelector('textarea');
+      const mensagem = textarea?.value.trim();
+      if (!mensagem) {
+        return;
+      }
+      tarefa.comentarios.push({
+        id: uuid(),
+        autorId: this.currentUser?.id ?? '',
+        mensagem,
+        data: new Date().toISOString(),
+      });
+      this.persistState();
+      this.renderTarefas();
+      this.renderDashboard();
+      this.openDetalheTarefaModal(tarefa);
+    });
+  }
+  private renderFinanceiro(): void {
+    const container = document.getElementById('section-financeiro');
+    if (!container) {
+      return;
+    }
+
+    const receitas = this.state.financeiro.filter((item) => item.tipo === 'receita');
+    const despesas = this.state.financeiro.filter((item) => item.tipo === 'despesa');
+    const saldo = receitas.reduce((acc, item) => acc + item.valor, 0) - despesas.reduce((acc, item) => acc + item.valor, 0);
+
+    container.innerHTML = `
+      <div class="flex-between">
+        <div>
+          <h3>Fluxo financeiro</h3>
+          <p class="section-description">Registre receitas e despesas, categorize lançamentos e acompanhe o fluxo de caixa.</p>
+        </div>
+        <button class="primary-button" id="novoLancamentoFinanceiro">Novo lançamento</button>
+      </div>
+      <form id="filtroFinanceiro" class="filters-row">
+        <select name="tipo">
+          <option value="">Todos os tipos</option>
+          <option value="receita">Receita</option>
+          <option value="despesa">Despesa</option>
+        </select>
+        <select name="status">
+          <option value="">Todos os status</option>
+          <option value="pago">Pago</option>
+          <option value="nao_pago">Não pago</option>
+        </select>
+        <input type="date" name="inicio" />
+        <input type="date" name="fim" />
+        <button type="submit" class="primary-button">Filtrar</button>
+      </form>
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <span>Total de receitas</span>
+          <strong>${formatCurrency(receitas.reduce((acc, item) => acc + item.valor, 0))}</strong>
+        </div>
+        <div class="metric-card">
+          <span>Total de despesas</span>
+          <strong>${formatCurrency(despesas.reduce((acc, item) => acc + item.valor, 0))}</strong>
+        </div>
+        <div class="metric-card">
+          <span>Saldo</span>
+          <strong>${formatCurrency(saldo)}</strong>
+        </div>
+      </div>
+      <div class="table-wrapper" style="margin-top:1.5rem">
+        <table>
+          <thead>
+            <tr>
+              <th>Data</th>
+              <th>Tipo</th>
+              <th>Categoria</th>
+              <th>Descrição</th>
+              <th>Valor</th>
+              <th>Status</th>
+              <th>Responsável</th>
+              <th>Processo</th>
+              <th>Ações</th>
+            </tr>
+          </thead>
+          <tbody id="financeiroTabela"></tbody>
+        </table>
+      </div>
+    `;
+
+    const tabela = document.getElementById('financeiroTabela');
+    const form = document.getElementById('filtroFinanceiro');
+
+    const renderRows = () => {
+      if (!tabela) {
+        return;
+      }
+      const dadosForm = new FormData(form as HTMLFormElement);
+      const tipo = (dadosForm.get('tipo') as 'receita' | 'despesa' | '') ?? '';
+      const status = (dadosForm.get('status') as ExpenseStatus | '') ?? '';
+      const inicio = dadosForm.get('inicio') as string;
+      const fim = dadosForm.get('fim') as string;
+
+      const linhas = this.state.financeiro
+        .filter((item) => {
+          const matchesTipo = tipo ? item.tipo === tipo : true;
+          const matchesStatus = status ? item.status === status : true;
+          const data = parseDate(item.data);
+          const matchesInicio = inicio ? data >= parseDate(inicio) : true;
+          const matchesFim = fim ? data <= parseDate(fim) : true;
+          return matchesTipo && matchesStatus && matchesInicio && matchesFim;
+        })
+        .sort((a, b) => parseDate(b.data).getTime() - parseDate(a.data).getTime())
+        .map((item) => {
+          const processo = this.state.processos.find((p) => p.id === item.processoId);
+          const badgeClass = item.tipo === 'receita' ? 'success' : 'danger';
+          return `
+            <tr data-financeiro-id="${item.id}">
+              <td>${formatDate(item.data)}</td>
+              <td><span class="badge ${badgeClass}">${item.tipo === 'receita' ? 'Receita' : 'Despesa'}</span></td>
+              <td>${item.categoria}</td>
+              <td>${item.descricao}</td>
+              <td>${formatCurrency(item.valor)}</td>
+              <td>${item.status === 'pago' ? 'Pago' : 'Não pago'}</td>
+              <td>${item.responsavel}</td>
+              <td>${processo ? processo.numeroProcesso : '-'}</td>
+              <td class="actions">
+                <button data-action="editar">Editar</button>
+                <button data-action="excluir">Excluir</button>
+              </td>
+            </tr>
+          `;
+        })
+        .join('');
+
+      tabela.innerHTML = linhas || '<tr><td colspan="9">Nenhum lançamento encontrado.</td></tr>';
+
+      tabela.querySelectorAll('button[data-action]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const action = (button as HTMLElement).getAttribute('data-action');
+          const row = button.closest('tr[data-financeiro-id]');
+          const id = row?.getAttribute('data-financeiro-id');
+          if (!id) {
+            return;
+          }
+          if (action === 'editar') {
+            const item = this.state.financeiro.find((f) => f.id === id);
+            if (item) {
+              this.openFinanceiroModal(item);
+            }
+          } else if (action === 'excluir') {
+            if (confirm('Deseja excluir este lançamento financeiro?')) {
+              this.state.financeiro = this.state.financeiro.filter((f) => f.id !== id);
+              this.persistState();
+              renderRows();
+            }
+          }
+        });
+      });
+    };
+
+    form?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      renderRows();
+    });
+
+    renderRows();
+
+    document
+      .getElementById('novoLancamentoFinanceiro')
+      ?.addEventListener('click', () => this.openFinanceiroModal());
+  }
+
+  private openFinanceiroModal(item?: FinanceEntry): void {
+    const container = document.getElementById('modalContainer');
+    if (!container) {
+      return;
+    }
+
+    const isEdit = Boolean(item);
+
+    container.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal">
+          <header>
+            <h4>${isEdit ? 'Editar lançamento' : 'Novo lançamento'}</h4>
+            <button id="closeModal">×</button>
+          </header>
+          <form id="financeiroForm" class="form-grid">
+            <div class="form-group">
+              <label>Tipo</label>
+              <select name="tipo" required>
+                <option value="receita" ${item?.tipo === 'receita' ? 'selected' : ''}>Receita</option>
+                <option value="despesa" ${item?.tipo === 'despesa' ? 'selected' : ''}>Despesa</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Categoria</label>
+              <select name="categoria" required>
+                ${this.state.configuracoes.categoriasDespesa
+                  .map((categoria) => `<option value="${categoria}" ${item?.categoria === categoria ? 'selected' : ''}>${categoria}</option>`)
+                  .join('')}
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Descrição</label>
+              <input type="text" name="descricao" required value="${item?.descricao ?? ''}" />
+            </div>
+            <div class="form-group">
+              <label>Valor</label>
+              <input type="number" name="valor" min="0" step="0.01" required value="${item?.valor ?? ''}" />
+            </div>
+            <div class="form-group">
+              <label>Data</label>
+              <input type="date" name="data" required value="${item ? item.data.slice(0, 10) : ''}" />
+            </div>
+            <div class="form-group">
+              <label>Status</label>
+              <select name="status" required>
+                <option value="pago" ${item?.status === 'pago' ? 'selected' : ''}>Pago</option>
+                <option value="nao_pago" ${item?.status === 'nao_pago' ? 'selected' : ''}>Não pago</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Responsável</label>
+              <input type="text" name="responsavel" required value="${item?.responsavel ?? this.currentUser?.nome ?? ''}" />
+            </div>
+            <div class="form-group">
+              <label>Processo vinculado</label>
+              <select name="processoId">
+                <option value="">Sem vínculo</option>
+                ${this.state.processos
+                  .map(
+                    (processo) =>
+                      `<option value="${processo.id}" ${item?.processoId === processo.id ? 'selected' : ''}>${
+                        processo.numeroProcesso
+                      }</option>`,
+                  )
+                  .join('')}
+              </select>
+            </div>
+          </form>
+          <footer>
+            <button class="primary-button" id="salvarFinanceiro">Salvar</button>
+            <button id="cancelarFinanceiro">Cancelar</button>
+          </footer>
+        </div>
+      </div>
+    `;
+
+    const closeModal = () => {
+      container.innerHTML = '';
+    };
+
+    document.getElementById('closeModal')?.addEventListener('click', closeModal);
+    document.getElementById('cancelarFinanceiro')?.addEventListener('click', closeModal);
+
+    document.getElementById('salvarFinanceiro')?.addEventListener('click', () => {
+      const form = document.getElementById('financeiroForm') as HTMLFormElement;
+      if (!form.reportValidity()) {
+        return;
+      }
+      const formData = new FormData(form);
+      const updated: FinanceEntry = {
+        id: item?.id ?? uuid(),
+        tipo: formData.get('tipo') as 'receita' | 'despesa',
+        categoria: String(formData.get('categoria') ?? ''),
+        descricao: String(formData.get('descricao') ?? ''),
+        valor: Number(formData.get('valor') ?? 0),
+        data: new Date(String(formData.get('data') ?? new Date().toISOString())).toISOString(),
+        status: formData.get('status') as ExpenseStatus,
+        responsavel: String(formData.get('responsavel') ?? ''),
+        processoId: (formData.get('processoId') as string) || null,
+      };
+
+      if (item) {
+        this.state.financeiro = this.state.financeiro.map((entrada) => (entrada.id === item.id ? updated : entrada));
+      } else {
+        this.state.financeiro.push(updated);
+      }
+
+      this.persistState();
+      closeModal();
+      this.renderFinanceiro();
+    });
+  }
+  private renderNotificacoes(): void {
+    const container = document.getElementById('section-notificacoes');
+    if (!container) {
+      return;
+    }
+
+    container.innerHTML = `
+      <div class="flex-between">
+        <div>
+          <h3>Notificações e alertas</h3>
+          <p class="section-description">Avisos automáticos sobre prazos, agenda, honorários e tarefas conforme suas preferências.</p>
+        </div>
+        <button class="primary-button" id="limparNotificacoes">Limpar alertas automáticos</button>
+      </div>
+      <div class="list" id="notificacoesLista"></div>
+    `;
+
+    const lista = document.getElementById('notificacoesLista');
+    if (!lista) {
+      return;
+    }
+
+    const notificacoesOrdenadas = this.state.notificacoes
+      .slice()
+      .sort((a, b) => parseDate(b.data).getTime() - parseDate(a.data).getTime());
+
+    lista.innerHTML =
+      notificacoesOrdenadas
+        .map((notificacao) => {
+          const processo = notificacao.processoId
+            ? this.state.processos.find((p) => p.id === notificacao.processoId)
+            : undefined;
+          return `
+            <div class="notification-card">
+              <strong>${notificacao.titulo}</strong>
+              <small>${formatDate(notificacao.data)}${
+            processo ? ` · Processo ${processo.numeroProcesso}` : ''
+          }</small>
+              <p>${notificacao.mensagem}</p>
+            </div>
+          `;
+        })
+        .join('') || '<p>Nenhum alerta disponível.</p>';
+
+    document.getElementById('limparNotificacoes')?.addEventListener('click', () => {
+      if (confirm('Remover todas as notificações automáticas geradas pelo sistema?')) {
+        this.state.notificacoes = this.state.notificacoes.filter((n) => !n.auto);
+        this.persistState();
+        this.renderNotificacoes();
+      }
+    });
+  }
+  private renderConfiguracoes(): void {
+    const container = document.getElementById('section-configuracoes');
+    if (!container) {
+      return;
+    }
+
+    const preferencias = this.currentUser?.preferencias ?? {
+      prazos: true,
+      agenda: true,
+      honorarios: true,
+      tarefas: true,
+    };
+
+    container.innerHTML = `
+      <h3>Configurações e preferências</h3>
+      <p class="section-description">Personalize categorias, tipos de perícia, status de processos e notificações por usuário.</p>
+      <div class="settings-grid">
+        <section class="section">
+          <h3 style="margin-bottom:0.5rem">Preferências de notificações</h3>
+          <form id="preferenciasForm" class="form-grid">
+            <label><input type="checkbox" name="prazos" ${preferencias.prazos ? 'checked' : ''}/> Alertas de prazos</label>
+            <label><input type="checkbox" name="agenda" ${preferencias.agenda ? 'checked' : ''}/> Agenda de perícias</label>
+            <label><input type="checkbox" name="honorarios" ${preferencias.honorarios ? 'checked' : ''}/> Honorários</label>
+            <label><input type="checkbox" name="tarefas" ${preferencias.tarefas ? 'checked' : ''}/> Tarefas</label>
+            <button type="submit" class="primary-button">Salvar preferências</button>
+          </form>
+        </section>
+        <section class="section">
+          <h3 style="margin-bottom:0.5rem">Categorias de despesas</h3>
+          <form id="categoriasForm" class="inline-form">
+            <input type="text" name="categoria" placeholder="Adicionar categoria" required />
+            <button type="submit" class="primary-button">Adicionar</button>
+          </form>
+          <div class="list" id="categoriasLista">
+            ${this.state.configuracoes.categoriasDespesa
+              .map(
+                (categoria) =>
+                  `<div class="notification-card">
+                    <strong>${categoria}</strong>
+                    <button data-remove-categoria="${categoria}">Remover</button>
+                  </div>`,
+              )
+              .join('')}
+          </div>
+        </section>
+        <section class="section">
+          <h3 style="margin-bottom:0.5rem">Tipos de perícia</h3>
+          <form id="tiposForm" class="inline-form">
+            <input type="text" name="tipo" placeholder="Adicionar tipo" required />
+            <button type="submit" class="primary-button">Adicionar</button>
+          </form>
+          <div class="list" id="tiposLista">
+            ${this.state.configuracoes.tiposPericia
+              .map(
+                (tipo) =>
+                  `<div class="notification-card">
+                    <strong>${tipo}</strong>
+                    <button data-remove-tipo="${tipo}">Remover</button>
+                  </div>`,
+              )
+              .join('')}
+          </div>
+        </section>
+        <section class="section">
+          <h3 style="margin-bottom:0.5rem">Status de processo</h3>
+          <form id="statusForm" class="inline-form">
+            <input type="text" name="status" placeholder="Identificador interno" required />
+            <input type="text" name="label" placeholder="Nome exibido" required />
+            <button type="submit" class="primary-button">Adicionar</button>
+          </form>
+          <div class="list" id="statusLista">
+            ${this.state.configuracoes.statusProcesso
+              .map(
+                (status) =>
+                  `<div class="notification-card">
+                    <strong>${status}</strong>
+                    <span>${PROCESS_STATUS_LABEL[status] ?? status}</span>
+                    <button data-remove-status="${status}">Remover</button>
+                  </div>`,
+              )
+              .join('')}
+          </div>
+        </section>
+        <section class="section">
+          <h3 style="margin-bottom:0.5rem">Usuários cadastrados</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Nome</th>
+                  <th>E-mail</th>
+                  <th>CPF</th>
+                  <th>Telefone</th>
+                  <th>Perfil</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${this.state.usuarios
+                  .map(
+                    (user) => `
+                      <tr>
+                        <td>${user.nome}</td>
+                        <td>${user.email}</td>
+                        <td>${user.cpf}</td>
+                        <td>${user.telefone}</td>
+                        <td>${ROLE_LABEL[user.perfil]}</td>
+                      </tr>
+                    `,
+                  )
+                  .join('')}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    `;
+
+    document.getElementById('preferenciasForm')?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (!this.currentUser) {
+        return;
+      }
+      const formData = new FormData(event.target as HTMLFormElement);
+      this.currentUser.preferencias = {
+        prazos: Boolean(formData.get('prazos')),
+        agenda: Boolean(formData.get('agenda')),
+        honorarios: Boolean(formData.get('honorarios')),
+        tarefas: Boolean(formData.get('tarefas')),
+      };
+      this.state.usuarios = this.state.usuarios.map((user) =>
+        user.id === this.currentUser?.id ? { ...user, preferencias: this.currentUser?.preferencias } : user,
+      );
+      this.persistState();
+      alert('Preferências atualizadas com sucesso.');
+    });
+
+    document.getElementById('categoriasForm')?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const input = (event.target as HTMLFormElement).querySelector('input[name="categoria"]') as HTMLInputElement;
+      const value = input.value.trim();
+      if (!value || this.state.configuracoes.categoriasDespesa.includes(value)) {
+        return;
+      }
+      this.state.configuracoes.categoriasDespesa.push(value);
+      this.persistState();
+      this.renderConfiguracoes();
+    });
+
+    document.querySelectorAll('[data-remove-categoria]')?.forEach((button) => {
+      button.addEventListener('click', () => {
+        const value = (button as HTMLElement).getAttribute('data-remove-categoria');
+        if (!value) {
+          return;
+        }
+        this.state.configuracoes.categoriasDespesa = this.state.configuracoes.categoriasDespesa.filter(
+          (categoria) => categoria !== value,
+        );
+        this.persistState();
+        this.renderConfiguracoes();
+      });
+    });
+
+    document.getElementById('tiposForm')?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const input = (event.target as HTMLFormElement).querySelector('input[name="tipo"]') as HTMLInputElement;
+      const value = input.value.trim();
+      if (!value || this.state.configuracoes.tiposPericia.includes(value)) {
+        return;
+      }
+      this.state.configuracoes.tiposPericia.push(value);
+      this.persistState();
+      this.renderConfiguracoes();
+    });
+
+    document.querySelectorAll('[data-remove-tipo]')?.forEach((button) => {
+      button.addEventListener('click', () => {
+        const value = (button as HTMLElement).getAttribute('data-remove-tipo');
+        if (!value) {
+          return;
+        }
+        this.state.configuracoes.tiposPericia = this.state.configuracoes.tiposPericia.filter((tipo) => tipo !== value);
+        this.persistState();
+        this.renderConfiguracoes();
+      });
+    });
+
+    document.getElementById('statusForm')?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const form = event.target as HTMLFormElement;
+      const status = (form.querySelector('input[name="status"]') as HTMLInputElement).value.trim();
+      const label = (form.querySelector('input[name="label"]') as HTMLInputElement).value.trim();
+      if (!status || !label) {
+        return;
+      }
+      if (!this.state.configuracoes.statusProcesso.includes(status as ProcessStatus)) {
+        this.state.configuracoes.statusProcesso.push(status as ProcessStatus);
+        PROCESS_STATUS_LABEL[status as ProcessStatus] = label;
+        this.persistState();
+        this.renderConfiguracoes();
+      }
+    });
+
+    document.querySelectorAll('[data-remove-status]')?.forEach((button) => {
+      button.addEventListener('click', () => {
+        const value = (button as HTMLElement).getAttribute('data-remove-status') as ProcessStatus | null;
+        if (!value) {
+          return;
+        }
+        this.state.configuracoes.statusProcesso = this.state.configuracoes.statusProcesso.filter(
+          (status) => status !== value,
+        );
+        delete PROCESS_STATUS_LABEL[value];
+        this.persistState();
+        this.renderConfiguracoes();
+      });
+    });
+  }
+  private generateNotifications(): void {
+    const manual = this.state.notificacoes.filter((notificacao) => !notificacao.auto);
+    const automaticas: NotificationItem[] = [];
+    const now = new Date();
+
+    const usuarios = this.state.usuarios.length ? this.state.usuarios : [
+      {
+        preferencias: { prazos: true, agenda: true, honorarios: true, tarefas: true },
+      } as User,
+    ];
+
+    const shouldNotify = (tipo: NotificationType) =>
+      usuarios.some((user) => {
+        const prefKey = PREF_KEY[tipo];
+        return user.preferencias?.[prefKey];
+      });
+
+    if (shouldNotify('agenda')) {
+      this.state.eventos.forEach((evento) => {
+        const diff = differenceInDays(evento.data, now);
+        if (diff >= 0 && diff <= 7) {
+          automaticas.push({
+            id: uuid(),
+            tipo: 'agenda',
+            titulo: `Evento em ${formatDate(evento.data)}`,
+            mensagem: `${evento.titulo} ocorrerá em ${diff} dia(s).`,
+            data: new Date().toISOString(),
+            processoId: evento.processoId,
+            auto: true,
+          });
+        }
+        if (evento.prazoEntrega && shouldNotify('prazo')) {
+          const prazoDiff = differenceInDays(evento.prazoEntrega, now);
+          if (prazoDiff >= 0 && prazoDiff <= 5) {
+            automaticas.push({
+              id: uuid(),
+              tipo: 'prazo',
+              titulo: 'Prazo de entrega próximo',
+              mensagem: `O laudo referente a ${evento.titulo} vence em ${prazoDiff} dia(s).`,
+              data: new Date().toISOString(),
+              processoId: evento.processoId,
+              auto: true,
+            });
+          }
+        }
+      });
+    }
+
+    if (shouldNotify('honorario')) {
+      this.state.honorarios.forEach((honorario) => {
+        if (honorario.status === 'recebido') {
+          return;
+        }
+        const diff = differenceInDays(honorario.vencimento, now);
+        if (diff <= 5) {
+          automaticas.push({
+            id: uuid(),
+            tipo: 'honorario',
+            titulo: diff < 0 ? 'Honorário em atraso' : 'Honorário próximo do vencimento',
+            mensagem:
+              diff < 0
+                ? `Parcela "${honorario.descricao}" está ${Math.abs(diff)} dia(s) em atraso.`
+                : `Parcela "${honorario.descricao}" vence em ${diff} dia(s).`,
+            data: new Date().toISOString(),
+            processoId: honorario.processoId,
+            auto: true,
+          });
+        }
+      });
+    }
+
+    if (shouldNotify('tarefa')) {
+      this.state.tarefas.forEach((tarefa) => {
+        if (tarefa.status === 'concluido') {
+          return;
+        }
+        const diff = differenceInDays(tarefa.dataTermino, now);
+        if (diff <= 3) {
+          automaticas.push({
+            id: uuid(),
+            tipo: 'tarefa',
+            titulo: 'Prazo de tarefa',
+            mensagem:
+              diff < 0
+                ? `A tarefa "${tarefa.titulo}" está atrasada há ${Math.abs(diff)} dia(s).`
+                : `A tarefa "${tarefa.titulo}" vence em ${diff} dia(s).`,
+            data: new Date().toISOString(),
+            processoId: tarefa.processoId,
+            auto: true,
+          });
+        }
+      });
+    }
+
+    this.state.notificacoes = [...manual, ...automaticas];
+
+    if (this.activeSection === 'notificacoes') {
+      this.renderNotificacoes();
     }
   }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  new VoiceNotesApp();
-
-  document
-    .querySelectorAll<HTMLElement>('[contenteditable][placeholder]')
-    .forEach((el) => {
-      const placeholder = el.getAttribute('placeholder')!;
-
-      function updatePlaceholderState() {
-        const currentText = (
-          el.id === 'polishedNote' ? el.innerText : el.textContent
-        )?.trim();
-
-        if (currentText === '' || currentText === placeholder) {
-          if (el.id === 'polishedNote' && currentText === '') {
-            el.innerHTML = placeholder;
-          } else if (currentText === '') {
-            el.textContent = placeholder;
-          }
-          el.classList.add('placeholder-active');
-        } else {
-          el.classList.remove('placeholder-active');
-        }
-      }
-
-      updatePlaceholderState();
-
-      el.addEventListener('focus', function () {
-        const currentText = (
-          this.id === 'polishedNote' ? this.innerText : this.textContent
-        )?.trim();
-        if (currentText === placeholder) {
-          if (this.id === 'polishedNote') this.innerHTML = '';
-          else this.textContent = '';
-          this.classList.remove('placeholder-active');
-        }
-      });
-
-      el.addEventListener('blur', function () {
-        updatePlaceholderState();
-      });
-    });
+  // Inicia a aplicação assim que o DOM estiver pronto.
+  new CaseManagementApp();
 });
-
-export {};
